@@ -1,4 +1,4 @@
-// OpenCVApplication.cpp : Defines the entry point for the console application.
+﻿// OpenCVApplication.cpp : Defines the entry point for the console application.
 //
 
 #include "stdafx.h"
@@ -6,7 +6,7 @@
 #include <opencv2/core/utils/logger.hpp>
 #include <random>
 
-const int PATCH_SIZE = 9;
+const int PATCH_SIZE = 15;
 const int DELTA = PATCH_SIZE / 2;
 
 wchar_t* projectPath;
@@ -191,57 +191,87 @@ std::vector<std::vector<bool>> computeMask(Mat img, int startX, int startY, int 
 	return mask;
 }
 
-std::vector<std::pair<int, int>> generateRandomPairs(const std::vector<std::vector<bool>>& mask, int startX, int endX,
-	int startY, int endY, int numPairs) {
-	if (mask.empty() || mask[0].empty()) {
+std::vector<std::pair<int, int>> generateRandomPairs(const std::vector<std::vector<bool>>& mask,
+	int startX, int endX,
+	int startY, int endY,
+	int numPairs) {
+	if (mask.empty() || mask[0].empty() || startX > endX || startY > endY || numPairs <= 0) {
 		return {};
 	}
 
-	if (startX > endX || startY > endY) {
-		return {};
-	}
-
-	int maxPairs = (endX - startX + 1) * (endY - startY + 1);
-	numPairs = min(numPairs, maxPairs);
-
-	if (numPairs <= 0) {
-		return {};
-	}
+	const int width = endX - startX + 1;
+	const int height = endY - startY + 1;
+	const int gridSize = 5; // Grid 5x5
+	const int patchesPerCell = numPairs / (gridSize * gridSize);
+	const int remainingPatches = numPairs % (gridSize * gridSize);
 
 	std::vector<std::pair<int, int>> result;
-	std::set<std::pair<int, int>> usedPairs;
+	result.reserve(numPairs);
 
 	std::random_device rd;
 	std::mt19937 gen(rd());
-	std::uniform_int_distribution<> distX(startX, endX);
-	std::uniform_int_distribution<> distY(startY, endY);
 
-	int attempts = 0;
-	const int MAX_ATTEMPTS = 2000;
+	// Punctele cheie de verificat (centru + colțuri)
+	const std::vector<std::pair<int, int>> checkPoints = {
+		{0, 0},          // Centru
+		{-DELTA, -DELTA}, // Stânga-sus
+		{DELTA, -DELTA},  // Dreapta-sus
+		{-DELTA, DELTA},  // Stânga-jos
+		{DELTA, DELTA}    // Dreapta-jos
+	};
 
-	while (result.size() < numPairs && attempts < MAX_ATTEMPTS) {
-		int x = distX(gen);
-		int y = distY(gen);
+	// Calculează dimensiunea unei celule grid
+	const int cellWidth = width / gridSize;
+	const int cellHeight = height / gridSize;
 
-		bool valid = true;
-		for (int dy = -DELTA; dy <= DELTA && valid; dy++) {
-			for (int dx = -DELTA; dx <= DELTA && valid; dx++) {
-				int nx = x + dx;
-				int ny = y + dy;
-				if (nx < 0 || nx >= mask[0].size() || ny < 0 || ny >= mask.size() || mask[ny][nx]) {
-					valid = false;
+	for (int gy = 0; gy < gridSize; ++gy) {
+		for (int gx = 0; gx < gridSize; ++gx) {
+			// Determină numărul de patch-uri pentru această celulă
+			int cellPatches = patchesPerCell + ((gy * gridSize + gx) < remainingPatches ? 1 : 0);
+			if (cellPatches == 0) continue;
+
+			// Calculează limitele celulei
+			int cellStartX = startX + gx * cellWidth;
+			int cellEndX = (gx == gridSize - 1) ? endX : cellStartX + cellWidth - 1;
+			int cellStartY = startY + gy * cellHeight;
+			int cellEndY = (gy == gridSize - 1) ? endY : cellStartY + cellHeight - 1;
+
+			// Distribuie uniform în celulă curentă
+			const int step = max(1, (cellWidth * cellHeight) / cellPatches);
+			int attempts = 0;
+			const int maxAttempts = cellPatches * 2; // Limită de încercări
+
+			for (int i = 0; i < cellPatches && attempts < maxAttempts; ++attempts) {
+				// Generează poziție în celulă
+				int x = cellStartX + (i * step) % cellWidth;
+				int y = cellStartY + ((i * step) / cellWidth) % cellHeight;
+
+				// Aplică perturbare aleatoare mică
+				std::uniform_int_distribution<> jitter(-step / 4, step / 4);
+				x += jitter(gen);
+				y += jitter(gen);
+
+				// Asigură-te că este în celulă
+				x = max(cellStartX, min(x, cellEndX));
+				y = max(cellStartY, min(y, cellEndY));
+
+				// Verifică punctele cheie
+				bool valid = true;
+				for (const auto& point : checkPoints) {
+					int nx = x + point.first;
+					int ny = y + point.second;
+					if (nx < 0 || nx >= mask[0].size() || ny < 0 || ny >= mask.size() || mask[ny][nx]) {
+						valid = false;
+						break;
+					}
+				}
+
+				if (valid) {
+					result.emplace_back(x, y);
+					i++;
 				}
 			}
 		}
-
-		if (valid) {
-			std::pair<int, int> newPair = { x, y };
-			if (usedPairs.find(newPair) == usedPairs.end()) {
-				result.push_back(newPair);
-				usedPairs.insert(newPair);
-			}
-		}
-		attempts++;
 	}
 
 	return result;
@@ -289,7 +319,7 @@ std::pair<int, int> findBestMatch(const Mat& img, const std::vector<std::vector<
 	double bestMatch = DBL_MAX;
 	int bestX = startX, bestY = startY;
 
-	int n = (img.rows * img.cols) / 4;
+	int n = std::sqrt(img.rows * img.cols);
 
 	std::vector<std::pair<int, int>> offsets = generateRandomPairs(mask, startX, endX, startY, endY, n);
 
@@ -305,8 +335,6 @@ std::pair<int, int> findBestMatch(const Mat& img, const std::vector<std::vector<
 	for (int i = 0; i < 5; i++) {
 		int width = (endX - startX) / 2;
 		int height = (endY - startY) / 2;
-
-		n /= 2;
 
 		startX = max(DELTA, bestX - width);
 		startY = max(DELTA, bestY - height);
@@ -341,11 +369,11 @@ void completePatch(Mat& img, std::vector<std::vector<bool>>& mask, int x, int y)
 			if (targetY >= 0 && targetY < img.rows && targetX >= 0 && targetX < img.cols &&
 				sourceY >= 0 && sourceY < img.rows && sourceX >= 0 && sourceX < img.cols) {
 
-				if (mask[targetY][targetX]) {
+				if (mask[targetY][targetX] && abs(dx) < DELTA / 2 && abs(dy) < DELTA / 2) {
 					img.at<Vec3b>(targetY, targetX) = img.at<Vec3b>(sourceY, sourceX);
 					mask[targetY][targetX] = false;
 				}
-				else {
+				else if (!mask[targetY][targetX]) {
 					int d = max(abs(dy), abs(dx));
 					double weight = d / (double)DELTA;
 					img.at<Vec3b>(targetY, targetX)[0] = img.at<Vec3b>(sourceY, sourceX)[0] * (1 - weight) + img.at<Vec3b>(targetY, targetX)[0] * weight;
