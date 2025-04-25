@@ -5,97 +5,16 @@
 #include "common.h"
 #include <opencv2/core/utils/logger.hpp>
 #include <random>
+#include <thread>
+#include <mutex>
+#include <unordered_set>
 
-const int PATCH_SIZE = 15;
+const int PATCH_SIZE = 13;
 const int DELTA = PATCH_SIZE / 2;
+const int STEP = DELTA / 2;
 
 wchar_t* projectPath;
 
-void testOpenImage()
-{
-	char fname[MAX_PATH];
-	while (openFileDlg(fname))
-	{
-		Mat src;
-		src = imread(fname);
-		imshow("image", src);
-		waitKey();
-	}
-}
-
-void testOpenImagesFld()
-{
-	char folderName[MAX_PATH];
-	if (openFolderDlg(folderName) == 0)
-		return;
-	char fname[MAX_PATH];
-	FileGetter fg(folderName, "bmp");
-	while (fg.getNextAbsFile(fname))
-	{
-		Mat src;
-		src = imread(fname);
-		imshow(fg.getFoundFileName(), src);
-		if (waitKey() == 27) //ESC pressed
-			break;
-	}
-}
-
-void testImageOpenAndSave()
-{
-	_wchdir(projectPath);
-
-	Mat src, dst;
-
-	src = imread("Images/Lena_24bits.bmp", IMREAD_COLOR);	// Read the image
-
-	if (!src.data)	// Check for invalid input
-	{
-		printf("Could not open or find the image\n");
-		return;
-	}
-
-	// Get the image resolution
-	Size src_size = Size(src.cols, src.rows);
-
-	// Display window
-	const char* WIN_SRC = "Src"; //window for the source image
-	namedWindow(WIN_SRC, WINDOW_AUTOSIZE);
-	moveWindow(WIN_SRC, 0, 0);
-
-	const char* WIN_DST = "Dst"; //window for the destination (processed) image
-	namedWindow(WIN_DST, WINDOW_AUTOSIZE);
-	moveWindow(WIN_DST, src_size.width + 10, 0);
-
-	cvtColor(src, dst, COLOR_BGR2GRAY); //converts the source image to a grayscale one
-
-	imwrite("Images/Lena_24bits_gray.bmp", dst); //writes the destination to file
-
-	imshow(WIN_SRC, src);
-	imshow(WIN_DST, dst);
-
-	waitKey(0);
-}
-
-void testResize()
-{
-	char fname[MAX_PATH];
-	while (openFileDlg(fname))
-	{
-		Mat src;
-		src = imread(fname);
-		Mat dst1, dst2;
-		//without interpolation
-		resizeImg(src, dst1, 320, false);
-		//with interpolation
-		resizeImg(src, dst2, 320, true);
-		imshow("input image", src);
-		imshow("resized image (without interpolation)", dst1);
-		imshow("resized image (with interpolation)", dst2);
-		waitKey();
-	}
-}
-
-// Structure to hold selection data
 struct SelectionData {
 	Mat original;
 	bool update = false;
@@ -121,11 +40,6 @@ void MyCallBackFunc(int event, int x, int y, int flags, void* param)
 			data->update = true;
 			data->startX = x;
 			data->startY = y;
-			printf("StartPos(x,y): %d,%d  Color(RGB): %d,%d,%d\n",
-				x, y,
-				(int)data->original.at<Vec3b>(y, x)[2],
-				(int)data->original.at<Vec3b>(y, x)[1],
-				(int)data->original.at<Vec3b>(y, x)[0]);
 		}
 	}
 	else if (event == EVENT_MOUSEMOVE && data->update)
@@ -142,12 +56,6 @@ void MyCallBackFunc(int event, int x, int y, int flags, void* param)
 
 			imshow("My Window", img);
 		}
-
-		//printf("IntPos(x,y): %d,%d  Color(RGB): %d,%d,%d\n",
-		//	x, y,
-		//	(int)data->original.at<Vec3b>(y, x)[2],
-		//	(int)data->original.at<Vec3b>(y, x)[1],
-		//	(int)data->original.at<Vec3b>(y, x)[0]);
 	}
 	else if (event == EVENT_LBUTTONUP && data->update)
 	{
@@ -164,12 +72,6 @@ void MyCallBackFunc(int event, int x, int y, int flags, void* param)
 				Scalar(0, 255, 0), 2);
 
 			imshow("My Window", img);
-
-			printf("EndPos(x,y): %d,%d  Color(RGB): %d,%d,%d\n",
-				x, y,
-				(int)data->original.at<Vec3b>(y, x)[2],
-				(int)data->original.at<Vec3b>(y, x)[1],
-				(int)data->original.at<Vec3b>(y, x)[0]);
 		}
 	}
 }
@@ -191,84 +93,112 @@ std::vector<std::vector<bool>> computeMask(Mat img, int startX, int startY, int 
 	return mask;
 }
 
-std::vector<std::pair<int, int>> generateRandomPairs(const std::vector<std::vector<bool>>& mask,
-	int startX, int endX,
-	int startY, int endY,
-	int numPairs) {
-	if (mask.empty() || mask[0].empty() || startX > endX || startY > endY || numPairs <= 0) {
+struct PairHash {
+	template <class T1, class T2>
+	std::size_t operator() (const std::pair<T1, T2>& pair) const {
+		auto hash1 = std::hash<T1>{}(pair.first);
+		auto hash2 = std::hash<T2>{}(pair.second);
+		return hash1 * 31 + hash2; 
+	}
+};
+
+bool isValidPoint(const std::vector<std::vector<bool>>& mask, int x, int y) {
+	const std::vector<std::pair<int, int>> cornerOffsets = {
+		{-DELTA, -DELTA}, { DELTA, -DELTA},
+		{-DELTA,  DELTA}, { DELTA,  DELTA}
+	};
+
+	for (const auto& offset : cornerOffsets) {
+		int cornerX = x + offset.first;
+		int cornerY = y + offset.second;
+		if (mask[cornerY][cornerX]) {
+			return false;
+		}
+	}
+	return true;
+}
+
+std::vector<std::pair<int, int>> generateRandomPairs(
+	const std::vector<std::vector<bool>>& mask,
+	int searchStartX, int searchEndX,
+	int searchStartY, int searchEndY,
+	int numPairs)
+{
+	if (mask.empty() || mask[0].empty() || searchStartX > searchEndX || searchStartY > searchEndY || numPairs <= 0) {
 		return {};
 	}
 
-	const int width = endX - startX + 1;
-	const int height = endY - startY + 1;
-	const int gridSize = 5; // Grid 5x5
-	const int patchesPerCell = numPairs / (gridSize * gridSize);
-	const int remainingPatches = numPairs % (gridSize * gridSize);
+	const int maskHeight = mask.size();
+	const int maskWidth = mask[0].size();
+	const int searchWidth = searchEndX - searchStartX + 1;
+	const int searchHeight = searchEndY - searchStartY + 1;
 
-	std::vector<std::pair<int, int>> result;
-	result.reserve(numPairs);
+	if (searchWidth <= 0 || searchHeight <= 0) {
+		return {};
+	}
 
 	std::random_device rd;
 	std::mt19937 gen(rd());
+	
 
-	// Punctele cheie de verificat (centru + colțuri)
-	const std::vector<std::pair<int, int>> checkPoints = {
-		{0, 0},          // Centru
-		{-DELTA, -DELTA}, // Stânga-sus
-		{DELTA, -DELTA},  // Dreapta-sus
-		{-DELTA, DELTA},  // Stânga-jos
-		{DELTA, DELTA}    // Dreapta-jos
-	};
+	std::vector<std::pair<int, int>> result;
+	result.reserve(numPairs);
+	std::unordered_set<std::pair<int, int>, PairHash> generatedPairs;
 
-	// Calculează dimensiunea unei celule grid
-	const int cellWidth = width / gridSize;
-	const int cellHeight = height / gridSize;
+	const int gridSize = 5;
+	const double cellWidth = searchWidth / gridSize;
+	const double cellHeight = searchHeight / gridSize;
+	const int maxAttemptsPerCell = min(cellWidth * cellHeight,  100);
+	const int pairsPerCell = numPairs / (gridSize * gridSize);
 
-	for (int gy = 0; gy < gridSize; ++gy) {
-		for (int gx = 0; gx < gridSize; ++gx) {
-			// Determină numărul de patch-uri pentru această celulă
-			int cellPatches = patchesPerCell + ((gy * gridSize + gx) < remainingPatches ? 1 : 0);
-			if (cellPatches == 0) continue;
+	if (pairsPerCell > 0 && maxAttemptsPerCell > 0) {
+		for (int gridY = 0; gridY < gridSize && result.size() < numPairs; gridY++) {
+			for (int gridX = 0; gridX < gridSize && result.size() < numPairs; gridX++) {
+				int cellStartX = searchStartX + gridX * cellWidth;
+				int cellEndX = min(searchEndX, searchStartX + (gridX + 1) * cellWidth) - 1;
+				int cellStartY = searchStartY + gridY * cellHeight;
+				int cellEndY = min(searchEndY, searchStartY + (gridY + 1) * cellHeight) - 1;
 
-			// Calculează limitele celulei
-			int cellStartX = startX + gx * cellWidth;
-			int cellEndX = (gx == gridSize - 1) ? endX : cellStartX + cellWidth - 1;
-			int cellStartY = startY + gy * cellHeight;
-			int cellEndY = (gy == gridSize - 1) ? endY : cellStartY + cellHeight - 1;
+				if (cellStartX > cellEndX || cellStartY > cellEndY) continue;
 
-			// Distribuie uniform în celulă curentă
-			const int step = max(1, (cellWidth * cellHeight) / cellPatches);
-			int attempts = 0;
-			const int maxAttempts = cellPatches * 2; // Limită de încercări
+				std::uniform_int_distribution<> distribX(cellStartX, cellEndX);
+				std::uniform_int_distribution<> distribY(cellStartY, cellEndY);
 
-			for (int i = 0; i < cellPatches && attempts < maxAttempts; ++attempts) {
-				// Generează poziție în celulă
-				int x = cellStartX + (i * step) % cellWidth;
-				int y = cellStartY + ((i * step) / cellWidth) % cellHeight;
+				for (int attempt = 0, cnt = 0; cnt < pairsPerCell && attempt < maxAttemptsPerCell; attempt++) {
+					int x = distribX(gen);
+					int y = distribY(gen);
 
-				// Aplică perturbare aleatoare mică
-				std::uniform_int_distribution<> jitter(-step / 4, step / 4);
-				x += jitter(gen);
-				y += jitter(gen);
-
-				// Asigură-te că este în celulă
-				x = max(cellStartX, min(x, cellEndX));
-				y = max(cellStartY, min(y, cellEndY));
-
-				// Verifică punctele cheie
-				bool valid = true;
-				for (const auto& point : checkPoints) {
-					int nx = x + point.first;
-					int ny = y + point.second;
-					if (nx < 0 || nx >= mask[0].size() || ny < 0 || ny >= mask.size() || mask[ny][nx]) {
-						valid = false;
-						break;
+					if (isValidPoint(mask, x, y)) {
+						std::pair<int, int> currentPair = { x, y };
+						if (generatedPairs.find(currentPair) == generatedPairs.end()) {
+							result.push_back(currentPair);
+							generatedPairs.insert(currentPair);
+							cnt++;
+						}
 					}
 				}
+			}
+		}
+	}
 
-				if (valid) {
-					result.emplace_back(x, y);
-					i++;
+	if (result.size() < numPairs) {
+		std::uniform_int_distribution<> distribX(searchStartX, searchEndX);
+		std::uniform_int_distribution<> distribY(searchStartY, searchEndY);
+
+		const int remainingPairs = numPairs - result.size();
+		const long long searchArea = (long long)(searchWidth) * searchHeight;
+		const int maxFallbackAttempts = max(remainingPairs * 50, 1000);
+
+
+		for (int attempt = 0; attempt < maxFallbackAttempts && result.size() < numPairs; attempt++) {
+			int x = distribX(gen);
+			int y = distribY(gen);
+
+			if (isValidPoint(mask, x, y)) {
+				std::pair<int, int> currentPair = { x, y };
+				if (generatedPairs.find(currentPair) == generatedPairs.end()) {
+					result.push_back(currentPair);
+					generatedPairs.insert(currentPair);
 				}
 			}
 		}
@@ -276,6 +206,7 @@ std::vector<std::pair<int, int>> generateRandomPairs(const std::vector<std::vect
 
 	return result;
 }
+
 
 double computeMSE(const Mat& img, const std::vector<std::vector<bool>>& mask,
 	int x1, int y1, int x2, int y2) {
@@ -289,18 +220,15 @@ double computeMSE(const Mat& img, const std::vector<std::vector<bool>>& mask,
 			int y2d = y2 + dy;
 			int x2d = x2 + dx;
 
-			if (y1d >= 0 && y1d < img.rows && x1d >= 0 && x1d < img.cols &&
-				y2d >= 0 && y2d < img.rows && x2d >= 0 && x2d < img.cols &&
-				!mask[y1d][x1d]) {
-
-				Vec3b p1 = img.at<Vec3b>(y1d, x1d);
-				Vec3b p2 = img.at<Vec3b>(y2d, x2d);
+			if (!mask[y1d][x1d]) {
+				Vec3b pixel1 = img.at<Vec3b>(y1d, x1d);
+				Vec3b pixel2 = img.at<Vec3b>(y2d, x2d);
 
 				for (int i = 0; i < 3; i++) {
-					int diff = abs(p1[i] - p2[i]);
+					int diff = abs(pixel1[i] - pixel2[i]);
 					sum += diff * diff;
 				}
-				
+
 				cnt++;
 			}
 		}
@@ -309,8 +237,7 @@ double computeMSE(const Mat& img, const std::vector<std::vector<bool>>& mask,
 	return cnt > 0 ? sum / cnt : DBL_MAX;
 }
 
-std::pair<int, int> findBestMatch(const Mat& img, const std::vector<std::vector<bool>>& mask,
-	int x, int y) {
+std::pair<int, int> findBestMatch(const Mat& img, const std::vector<std::vector<bool>>& mask, int x, int y) {
 	int startX = DELTA;
 	int endX = img.cols - 1 - DELTA;
 	int startY = DELTA;
@@ -319,7 +246,7 @@ std::pair<int, int> findBestMatch(const Mat& img, const std::vector<std::vector<
 	double bestMatch = DBL_MAX;
 	int bestX = startX, bestY = startY;
 
-	int n = std::sqrt(img.rows * img.cols);
+	int n = std::sqrt(img.rows * img.cols) / 2;
 
 	std::vector<std::pair<int, int>> offsets = generateRandomPairs(mask, startX, endX, startY, endY, n);
 
@@ -329,6 +256,10 @@ std::pair<int, int> findBestMatch(const Mat& img, const std::vector<std::vector<
 			bestMatch = diff;
 			bestX = offset.first;
 			bestY = offset.second;
+
+			if (diff < 25.0) {
+				return { bestX, bestY };
+			}
 		}
 	}
 
@@ -336,19 +267,28 @@ std::pair<int, int> findBestMatch(const Mat& img, const std::vector<std::vector<
 		int width = (endX - startX) / 2;
 		int height = (endY - startY) / 2;
 
+		n = std::sqrt(height * width);
+		if (n < 50) {
+			n = height * width;
+		}
+
 		startX = max(DELTA, bestX - width);
 		startY = max(DELTA, bestY - height);
 		endX = min(img.cols - 1 - DELTA, bestX + width);
 		endY = min(img.rows - 1 - DELTA, bestY + height);
 
-		std::vector<std::pair<int, int>> newOffsets = generateRandomPairs(mask, startX, endX, startY, endY, 100);
+		offsets = generateRandomPairs(mask, startX, endX, startY, endY, n);
 
-		for (const auto& offset : newOffsets) {
+		for (const auto& offset : offsets) {
 			double diff = computeMSE(img, mask, x, y, offset.first, offset.second);
 			if (diff < bestMatch) {
 				bestMatch = diff;
 				bestX = offset.first;
 				bestY = offset.second;
+
+				if (diff < 25.0) {
+					return { bestX, bestY };
+				}
 			}
 		}
 	}
@@ -359,26 +299,46 @@ std::pair<int, int> findBestMatch(const Mat& img, const std::vector<std::vector<
 void completePatch(Mat& img, std::vector<std::vector<bool>>& mask, int x, int y) {
 	std::pair<int, int> offset = findBestMatch(img, mask, x, y);
 
-	for (int dy = -DELTA; dy <= DELTA; dy++) {
-		for (int dx = -DELTA; dx <= DELTA; dx++) {
+	for (int dy = -STEP; dy <= STEP; dy++) {
+		for (int dx = -STEP; dx <= STEP; dx++) {
 			int targetY = y + dy;
 			int targetX = x + dx;
 			int sourceY = offset.second + dy;
 			int sourceX = offset.first + dx;
 
-			if (targetY >= 0 && targetY < img.rows && targetX >= 0 && targetX < img.cols &&
-				sourceY >= 0 && sourceY < img.rows && sourceX >= 0 && sourceX < img.cols) {
+			if (mask[targetY][targetX]) {
+				img.at<Vec3b>(targetY, targetX) = img.at<Vec3b>(sourceY, sourceX);
+				mask[targetY][targetX] = false;
+			}
+		}
+	}
 
-				if (mask[targetY][targetX] && abs(dx) < DELTA / 2 && abs(dy) < DELTA / 2) {
-					img.at<Vec3b>(targetY, targetX) = img.at<Vec3b>(sourceY, sourceX);
-					mask[targetY][targetX] = false;
-				}
-				else if (!mask[targetY][targetX]) {
-					int d = max(abs(dy), abs(dx));
-					double weight = d / (double)DELTA;
-					img.at<Vec3b>(targetY, targetX)[0] = img.at<Vec3b>(sourceY, sourceX)[0] * (1 - weight) + img.at<Vec3b>(targetY, targetX)[0] * weight;
-					img.at<Vec3b>(targetY, targetX)[1] = img.at<Vec3b>(sourceY, sourceX)[1] * (1 - weight) + img.at<Vec3b>(targetY, targetX)[1] * weight;
-					img.at<Vec3b>(targetY, targetX)[2] = img.at<Vec3b>(sourceY, sourceX)[2] * (1 - weight) + img.at<Vec3b>(targetY, targetX)[2] * weight;
+	for (int dy = -DELTA; dy <= DELTA; dy++) {
+		for (int dx = -DELTA; dx <= DELTA; dx++) {
+			if (abs(dx) >= STEP || abs(dy) >= STEP) {
+				int targetY = y + dy;
+				int targetX = x + dx;
+				int sourceY = offset.second + dy;
+				int sourceX = offset.first + dx;
+
+				if (!mask[targetY][targetX]) {
+					// Calculate distance from patch center
+					double dist = sqrt(dx * dx + dy * dy) / DELTA;
+
+					// Calculate weight with smoother falloff
+					double weight = pow(dist, 1.5); // Adjust exponent for transition sharpness
+					weight = min(1.0, max(0.0, weight));
+
+					// Get gradient information
+					Vec3b sourcePixel = img.at<Vec3b>(sourceY, sourceX);
+					Vec3b targetPixel = img.at<Vec3b>(targetY, targetX);
+
+					// Calculate gradient-aware blending
+					for (int c = 0; c < 3; c++) {
+						// Blend with respect to local gradient
+						img.at<Vec3b>(targetY, targetX)[c] =
+							sourcePixel[c] * (1 - weight) + targetPixel[c] * weight;
+					}
 				}
 			}
 		}
@@ -394,14 +354,6 @@ Mat imageReconstruction(Mat& img, int startX, int startY, int endX, int endY)
 	endX = min(img.cols - 1 - DELTA, endX);
 	endY = min(img.rows - 1 - DELTA, endY);
 
-	if (endX - startX + 1 > 0 (endX - startX + 1) % PATCH_SIZE == 0) {
-		endX--;
-	}
-
-	if (endY - startY + 1 > 0 (endY - startY + 1) % PATCH_SIZE == 0) {
-		endY--;
-	}
-
 	std::vector<std::vector<bool>> mask = computeMask(img, startX, startY, endX, endY);
 
 	for (int y = startY + 1; y <= endY - 1; y++) {
@@ -415,10 +367,10 @@ Mat imageReconstruction(Mat& img, int startX, int startY, int endX, int endY)
 	waitKey(0);
 
 	std::queue<std::pair<int, int>> Q;
-	Q.push({ startX + 2, startY + 2 });
-	Q.push({ startX + 2, endY - 2 });
-	Q.push({ endX - 2, startY + 2 });
-	Q.push({ endX - 2, endY - 2 });
+	Q.push({ startX + 1, startY + 1 });
+	Q.push({ endX - 1, startY + 1 });
+	Q.push({ startX + 1, endY - 1 });
+	Q.push({ endX - 1, endY - 1 });
 
 	while (!Q.empty()) {
 		auto front = Q.front();
@@ -426,13 +378,21 @@ Mat imageReconstruction(Mat& img, int startX, int startY, int endX, int endY)
 		int x = front.first;
 		int y = front.second;
 
-		if (x >= startX && y >= startY && x <= endX && y <= endY && mask[y][x]) {
+		if (mask[y][x] && x >= startX && y >= startY && x <= endX && y <= endY) {
 			completePatch(reconstruction, mask, x, y);
 
-			Q.push({ x - DELTA - 1, y });
-			Q.push({ x, y - DELTA - 1 });
-			Q.push({ x + DELTA + 1, y });
-			Q.push({ x, y + DELTA + 1 });
+			if (x - STEP - 1 >= 0 && mask[y][x - STEP - 1]) {
+				Q.push({ x - STEP - 1, y });
+			}
+			if (y - STEP - 1 >= 0 && mask[y - STEP - 1][x]) {
+				Q.push({ x, y - STEP - 1 });
+			}
+			if (x + STEP + 1 < reconstruction.cols && mask[y][x + STEP + 1]) {
+				Q.push({ x + STEP + 1, y });
+			}
+			if (y + STEP + 1 < reconstruction.rows && mask[y + STEP + 1][x]) {
+				Q.push({ x, y + STEP + 1 });
+			}
 		}
 	}
 
@@ -499,29 +459,13 @@ int main()
 		system("cls");
 		destroyAllWindows();
 		printf("Menu:\n");
-		printf(" 1 - Open image\n");
-		printf(" 2 - Open BMP images from folder\n");
-		printf(" 6 - BGR->Gray (fast, save result to disk) \n");
-		printf(" 8 - Resize image\n");
-		printf(" 12 - Mouse callback demo\n");
+		printf(" 1 - Demo\n");
 		printf(" 0 - Exit\n\n");
 		printf("Option: ");
 		scanf("%d", &op);
 		switch (op)
 		{
 		case 1:
-			testOpenImage();
-			break;
-		case 2:
-			testOpenImagesFld();
-			break;
-		case 6:
-			testImageOpenAndSave();
-			break;
-		case 8:
-			testResize();
-			break;
-		case 12:
 			testMouseClick();
 			break;
 		}
