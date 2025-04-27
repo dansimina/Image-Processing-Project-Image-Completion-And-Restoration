@@ -5,8 +5,6 @@
 #include "common.h"
 #include <opencv2/core/utils/logger.hpp>
 #include <random>
-#include <thread>
-#include <mutex>
 #include <unordered_set>
 
 const int PATCH_SIZE = 13;
@@ -32,7 +30,7 @@ struct SelectionData {
 void MyCallBackFunc(int event, int x, int y, int flags, void* param)
 {
 	SelectionData* data = (SelectionData*)param;
-	Mat img = data->original.clone(); 
+	Mat img = data->original.clone();
 
 	if (event == EVENT_LBUTTONDOWN && !data->selected)
 	{
@@ -98,23 +96,19 @@ struct PairHash {
 	std::size_t operator() (const std::pair<T1, T2>& pair) const {
 		auto hash1 = std::hash<T1>{}(pair.first);
 		auto hash2 = std::hash<T2>{}(pair.second);
-		return hash1 * 31 + hash2; 
+		return hash1 * 31 + hash2;
 	}
 };
 
 bool isValidPoint(const std::vector<std::vector<bool>>& mask, int x, int y) {
-	const std::vector<std::pair<int, int>> cornerOffsets = {
-		{-DELTA, -DELTA}, { DELTA, -DELTA},
-		{-DELTA,  DELTA}, { DELTA,  DELTA}
-	};
-
-	for (const auto& offset : cornerOffsets) {
-		int cornerX = x + offset.first;
-		int cornerY = y + offset.second;
-		if (mask[cornerY][cornerX]) {
-			return false;
+	for (int dy = -DELTA; dy <= DELTA; dy++) {
+		for (int dx = -DELTA; dx <= DELTA; dx++) {
+			if (mask[y + dy][x + dx]) {
+				return false;
+			}
 		}
 	}
+
 	return true;
 }
 
@@ -139,7 +133,7 @@ std::vector<std::pair<int, int>> generateRandomPairs(
 
 	std::random_device rd;
 	std::mt19937 gen(rd());
-	
+
 
 	std::vector<std::pair<int, int>> result;
 	result.reserve(numPairs);
@@ -148,7 +142,7 @@ std::vector<std::pair<int, int>> generateRandomPairs(
 	const int gridSize = 5;
 	const double cellWidth = searchWidth / gridSize;
 	const double cellHeight = searchHeight / gridSize;
-	const int maxAttemptsPerCell = min(cellWidth * cellHeight,  100);
+	const int maxAttemptsPerCell = min(cellWidth * cellHeight, 100);
 	const int pairsPerCell = numPairs / (gridSize * gridSize);
 
 	if (pairsPerCell > 0 && maxAttemptsPerCell > 0) {
@@ -186,7 +180,7 @@ std::vector<std::pair<int, int>> generateRandomPairs(
 		std::uniform_int_distribution<> distribY(searchStartY, searchEndY);
 
 		const int remainingPairs = numPairs - result.size();
-		const long long searchArea = (long long)(searchWidth) * searchHeight;
+		const long long searchArea = (long long)(searchWidth)*searchHeight;
 		const int maxFallbackAttempts = max(remainingPairs * 50, 1000);
 
 
@@ -219,6 +213,10 @@ double computeMSE(const Mat& img, const std::vector<std::vector<bool>>& mask,
 			int x1d = x1 + dx;
 			int y2d = y2 + dy;
 			int x2d = x2 + dx;
+
+			//if (mask[y2d][x2d]) {
+			//	return DBL_MAX;  // Reject this patch
+			//}
 
 			if (!mask[y1d][x1d]) {
 				Vec3b pixel1 = img.at<Vec3b>(y1d, x1d);
