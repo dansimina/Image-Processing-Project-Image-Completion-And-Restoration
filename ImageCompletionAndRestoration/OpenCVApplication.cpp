@@ -268,9 +268,6 @@ std::pair<int, int> findBestMatch(const Mat& img, const std::vector<std::vector<
 		int height = (endY - startY) / 2;
 
 		n = std::sqrt(height * width);
-		if (n < 50) {
-			n = height * width;
-		}
 
 		startX = max(DELTA, bestX - width);
 		startY = max(DELTA, bestY - height);
