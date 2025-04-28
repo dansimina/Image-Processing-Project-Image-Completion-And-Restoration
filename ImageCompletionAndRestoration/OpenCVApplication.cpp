@@ -9,7 +9,7 @@
 
 const int PATCH_SIZE = 13;
 const int DELTA = PATCH_SIZE / 2;
-const int STEP = DELTA / 2;
+const int DELTA2 = DELTA / 2;
 
 wchar_t* projectPath;
 
@@ -100,7 +100,7 @@ struct PairHash {
 	}
 };
 
-bool isValidPoint(const std::vector<std::vector<bool>>& mask, int x, int y) {
+bool isValidPatch(const std::vector<std::vector<bool>>& mask, int x, int y) {
 	for (int dy = -DELTA; dy <= DELTA; dy++) {
 		for (int dx = -DELTA; dx <= DELTA; dx++) {
 			if (mask[y + dy][x + dx]) {
@@ -162,7 +162,7 @@ std::vector<std::pair<int, int>> generateRandomPairs(
 					int x = distribX(gen);
 					int y = distribY(gen);
 
-					if (isValidPoint(mask, x, y)) {
+					if (isValidPatch(mask, x, y)) {
 						std::pair<int, int> currentPair = { x, y };
 						if (generatedPairs.find(currentPair) == generatedPairs.end()) {
 							result.push_back(currentPair);
@@ -188,7 +188,7 @@ std::vector<std::pair<int, int>> generateRandomPairs(
 			int x = distribX(gen);
 			int y = distribY(gen);
 
-			if (isValidPoint(mask, x, y)) {
+			if (isValidPatch(mask, x, y)) {
 				std::pair<int, int> currentPair = { x, y };
 				if (generatedPairs.find(currentPair) == generatedPairs.end()) {
 					result.push_back(currentPair);
@@ -202,37 +202,40 @@ std::vector<std::pair<int, int>> generateRandomPairs(
 }
 
 
-double computeMSE(const Mat& img, const std::vector<std::vector<bool>>& mask,
-	int x1, int y1, int x2, int y2) {
-	double sum = 0;
-	int cnt = 0;
-
+int computeSSE(const Mat& img, const std::vector<std::vector<bool>>& mask, int x1, int y1, int x2, int y2) {
+	int sum = 0;
 	for (int dy = -DELTA; dy <= DELTA; dy++) {
 		for (int dx = -DELTA; dx <= DELTA; dx++) {
-			int y1d = y1 + dy;
-			int x1d = x1 + dx;
-			int y2d = y2 + dy;
-			int x2d = x2 + dx;
-
-			//if (mask[y2d][x2d]) {
-			//	return DBL_MAX;  // Reject this patch
-			//}
-
-			if (!mask[y1d][x1d]) {
-				Vec3b pixel1 = img.at<Vec3b>(y1d, x1d);
-				Vec3b pixel2 = img.at<Vec3b>(y2d, x2d);
-
-				for (int i = 0; i < 3; i++) {
-					int diff = abs(pixel1[i] - pixel2[i]);
-					sum += diff * diff;
-				}
-
-				cnt++;
+			if (!mask[y1 + dy][x1 + dx]) { 
+				const Vec3b& p1 = img.at<Vec3b>(y1 + dy, x1 + dx);
+				const Vec3b& p2 = img.at<Vec3b>(y2 + dy, x2 + dx);
+				sum += (p1[0] - p2[0]) * (p1[0] - p2[0])
+					+ (p1[1] - p2[1]) * (p1[1] - p2[1])
+					+ (p1[2] - p2[2]) * (p1[2] - p2[2]);
 			}
 		}
 	}
+	return sum;
+}
 
-	return cnt > 0 ? sum / cnt : DBL_MAX;
+std::pair<int, int> propagate(const Mat& img, const std::vector<std::vector<bool>>& mask, int x, int y, int offsetX, int offsetY) {
+	const int offsets[8][2] = { {-1,0}, {1,0}, {0,-1}, {0,1}, {-1,-1}, {1,1}, {-1,1}, {1,-1} };
+	int bestSSE = computeSSE(img, mask, x, y, offsetX, offsetY);
+	int bestX = offsetX, bestY = offsetY;
+
+	for (int i = 0; i < 8; i++) {
+		int nx = x + offsets[i][0];
+		int ny = y + offsets[i][1];
+		if (nx >= DELTA && nx < img.cols - DELTA && ny >= DELTA && ny < img.rows - DELTA && isValidPatch(mask, nx, ny)) {
+			int sse = computeSSE(img, mask, x, y, nx, ny);
+			if (sse < bestSSE) {
+				bestSSE = sse;
+				bestX = nx;
+				bestY = ny;
+			}
+		}
+	}
+	return { bestX, bestY };
 }
 
 std::pair<int, int> findBestMatch(const Mat& img, const std::vector<std::vector<bool>>& mask, int x, int y) {
@@ -241,7 +244,7 @@ std::pair<int, int> findBestMatch(const Mat& img, const std::vector<std::vector<
 	int startY = DELTA;
 	int endY = img.rows - 1 - DELTA;
 
-	double bestMatch = DBL_MAX;
+	int bestMatch = INT_MAX;
 	int bestX = startX, bestY = startY;
 
 	int n = std::sqrt(img.rows * img.cols) / 2;
@@ -249,15 +252,15 @@ std::pair<int, int> findBestMatch(const Mat& img, const std::vector<std::vector<
 	std::vector<std::pair<int, int>> offsets = generateRandomPairs(mask, startX, endX, startY, endY, n);
 
 	for (const auto& offset : offsets) {
-		double diff = computeMSE(img, mask, x, y, offset.first, offset.second);
+		double diff = computeSSE(img, mask, x, y, offset.first, offset.second);
 		if (diff < bestMatch) {
 			bestMatch = diff;
 			bestX = offset.first;
 			bestY = offset.second;
 
-			if (diff < 25.0) {
-				return { bestX, bestY };
-			}
+			/*if (diff < 10.0) {
+				break;
+			}*/
 		}
 	}
 
@@ -275,27 +278,27 @@ std::pair<int, int> findBestMatch(const Mat& img, const std::vector<std::vector<
 		offsets = generateRandomPairs(mask, startX, endX, startY, endY, n);
 
 		for (const auto& offset : offsets) {
-			double diff = computeMSE(img, mask, x, y, offset.first, offset.second);
+			double diff = computeSSE(img, mask, x, y, offset.first, offset.second);
 			if (diff < bestMatch) {
 				bestMatch = diff;
 				bestX = offset.first;
 				bestY = offset.second;
 
-				if (diff < 25.0) {
-					return { bestX, bestY };
-				}
+				/*if (diff < 10.0) {
+					break;
+				}*/
 			}
 		}
 	}
 
-	return { bestX, bestY };
+	return propagate(img, mask, x, y, bestX, bestY);
 }
 
 void completePatch(Mat& img, std::vector<std::vector<bool>>& mask, int x, int y) {
 	std::pair<int, int> offset = findBestMatch(img, mask, x, y);
 
-	for (int dy = -STEP; dy <= STEP; dy++) {
-		for (int dx = -STEP; dx <= STEP; dx++) {
+	for (int dy = -DELTA2; dy <= DELTA2; dy++) {
+		for (int dx = -DELTA2; dx <= DELTA2; dx++) {
 			int targetY = y + dy;
 			int targetX = x + dx;
 			int sourceY = offset.second + dy;
@@ -310,7 +313,7 @@ void completePatch(Mat& img, std::vector<std::vector<bool>>& mask, int x, int y)
 
 	for (int dy = -DELTA; dy <= DELTA; dy++) {
 		for (int dx = -DELTA; dx <= DELTA; dx++) {
-			if (abs(dx) >= STEP || abs(dy) >= STEP) {
+			if (abs(dx) >= DELTA2 || abs(dy) >= DELTA2) {
 				int targetY = y + dy;
 				int targetX = x + dx;
 				int sourceY = offset.second + dy;
@@ -376,17 +379,17 @@ Mat imageReconstruction(Mat& img, int startX, int startY, int endX, int endY)
 		if (mask[y][x] && x >= startX && y >= startY && x <= endX && y <= endY) {
 			completePatch(reconstruction, mask, x, y);
 
-			if (x - STEP - 1 >= 0 && mask[y][x - STEP - 1]) {
-				Q.push({ x - STEP - 1, y });
+			if (x - DELTA2 - 1 >= 0 && mask[y][x - DELTA2 - 1]) {
+				Q.push({ x - DELTA2 - 1, y });
 			}
-			if (y - STEP - 1 >= 0 && mask[y - STEP - 1][x]) {
-				Q.push({ x, y - STEP - 1 });
+			if (y - DELTA2 - 1 >= 0 && mask[y - DELTA2 - 1][x]) {
+				Q.push({ x, y - DELTA2 - 1 });
 			}
-			if (x + STEP + 1 < reconstruction.cols && mask[y][x + STEP + 1]) {
-				Q.push({ x + STEP + 1, y });
+			if (x + DELTA2 + 1 < reconstruction.cols && mask[y][x + DELTA2 + 1]) {
+				Q.push({ x + DELTA2 + 1, y });
 			}
-			if (y + STEP + 1 < reconstruction.rows && mask[y + STEP + 1][x]) {
-				Q.push({ x, y + STEP + 1 });
+			if (y + DELTA2 + 1 < reconstruction.rows && mask[y + DELTA2 + 1][x]) {
+				Q.push({ x, y + DELTA2 + 1 });
 			}
 		}
 	}
