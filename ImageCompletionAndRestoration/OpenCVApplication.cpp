@@ -11,6 +11,8 @@ const int PATCH_SIZE = 13;
 const int DELTA = PATCH_SIZE / 2;
 const int DELTA2 = DELTA / 2;
 
+const int STEP = 32;
+
 wchar_t* projectPath;
 
 struct SelectionData {
@@ -91,15 +93,6 @@ std::vector<std::vector<bool>> computeMask(Mat img, int startX, int startY, int 
 	return mask;
 }
 
-struct PairHash {
-	template <class T1, class T2>
-	std::size_t operator() (const std::pair<T1, T2>& pair) const {
-		auto hash1 = std::hash<T1>{}(pair.first);
-		auto hash2 = std::hash<T2>{}(pair.second);
-		return hash1 * 31 + hash2;
-	}
-};
-
 bool isValidPatch(const std::vector<std::vector<bool>>& mask, int x, int y) {
 	for (int dy = -DELTA; dy <= DELTA; dy++) {
 		for (int dx = -DELTA; dx <= DELTA; dx++) {
@@ -112,91 +105,28 @@ bool isValidPatch(const std::vector<std::vector<bool>>& mask, int x, int y) {
 	return true;
 }
 
-std::vector<std::pair<int, int>> generateRandomPairs(
-	const std::vector<std::vector<bool>>& mask,
-	int searchStartX, int searchEndX,
-	int searchStartY, int searchEndY,
-	int numPairs)
+std::vector<std::pair<int, int>> generateRandomPairs( const std::vector<std::vector<bool>>& mask, int searchStartX, int searchEndX, int searchStartY, int searchEndY)
 {
-	if (mask.empty() || mask[0].empty() || searchStartX > searchEndX || searchStartY > searchEndY || numPairs <= 0) {
+	if (mask.empty() || mask[0].empty() || searchStartX > searchEndX || searchStartY > searchEndY) {
 		return {};
 	}
-
-	const int maskHeight = mask.size();
-	const int maskWidth = mask[0].size();
-	const int searchWidth = searchEndX - searchStartX + 1;
-	const int searchHeight = searchEndY - searchStartY + 1;
-
-	if (searchWidth <= 0 || searchHeight <= 0) {
-		return {};
-	}
-
-	std::random_device rd;
-	std::mt19937 gen(rd());
-
 
 	std::vector<std::pair<int, int>> result;
-	result.reserve(numPairs);
-	std::unordered_set<std::pair<int, int>, PairHash> generatedPairs;
+	const int RANGE = STEP / 2 - DELTA;
 
-	const int gridSize = 5;
-	const double cellWidth = searchWidth / gridSize;
-	const double cellHeight = searchHeight / gridSize;
-	const int maxAttemptsPerCell = min(cellWidth * cellHeight, 100);
-	const int pairsPerCell = numPairs / (gridSize * gridSize);
+	srand(time(0));
 
-	if (pairsPerCell > 0 && maxAttemptsPerCell > 0) {
-		for (int gridY = 0; gridY < gridSize && result.size() < numPairs; gridY++) {
-			for (int gridX = 0; gridX < gridSize && result.size() < numPairs; gridX++) {
-				int cellStartX = searchStartX + gridX * cellWidth;
-				int cellEndX = min(searchEndX, searchStartX + (gridX + 1) * cellWidth) - 1;
-				int cellStartY = searchStartY + gridY * cellHeight;
-				int cellEndY = min(searchEndY, searchStartY + (gridY + 1) * cellHeight) - 1;
+	for (int y = searchStartY; y <= searchEndY; y += STEP) {
+		for (int x = searchStartX; x <= searchEndX; x += STEP) {
+			int dx = x + (rand() % (RANGE * 2)) - RANGE;
+			int dy = y + (rand() % (RANGE * 2)) - RANGE;
 
-				if (cellStartX > cellEndX || cellStartY > cellEndY) continue;
-
-				std::uniform_int_distribution<> distribX(cellStartX, cellEndX);
-				std::uniform_int_distribution<> distribY(cellStartY, cellEndY);
-
-				for (int attempt = 0, cnt = 0; cnt < pairsPerCell && attempt < maxAttemptsPerCell; attempt++) {
-					int x = distribX(gen);
-					int y = distribY(gen);
-
-					if (isValidPatch(mask, x, y)) {
-						std::pair<int, int> currentPair = { x, y };
-						if (generatedPairs.find(currentPair) == generatedPairs.end()) {
-							result.push_back(currentPair);
-							generatedPairs.insert(currentPair);
-							cnt++;
-						}
-					}
-				}
+			if (isValidPatch(mask, dx, dy)) {
+				result.push_back({ dx, dy });
 			}
 		}
 	}
-
-	if (result.size() < numPairs) {
-		std::uniform_int_distribution<> distribX(searchStartX, searchEndX);
-		std::uniform_int_distribution<> distribY(searchStartY, searchEndY);
-
-		const int remainingPairs = numPairs - result.size();
-		const long long searchArea = (long long)(searchWidth)*searchHeight;
-		const int maxFallbackAttempts = max(remainingPairs * 50, 1000);
-
-
-		for (int attempt = 0; attempt < maxFallbackAttempts && result.size() < numPairs; attempt++) {
-			int x = distribX(gen);
-			int y = distribY(gen);
-
-			if (isValidPatch(mask, x, y)) {
-				std::pair<int, int> currentPair = { x, y };
-				if (generatedPairs.find(currentPair) == generatedPairs.end()) {
-					result.push_back(currentPair);
-					generatedPairs.insert(currentPair);
-				}
-			}
-		}
-	}
+	
 
 	return result;
 }
@@ -239,17 +169,15 @@ std::pair<int, int> propagate(const Mat& img, const std::vector<std::vector<bool
 }
 
 std::pair<int, int> findBestMatch(const Mat& img, const std::vector<std::vector<bool>>& mask, int x, int y) {
-	int startX = DELTA;
-	int endX = img.cols - 1 - DELTA;
-	int startY = DELTA;
-	int endY = img.rows - 1 - DELTA;
+	int startX = STEP;
+	int endX = img.cols - 1 - STEP;
+	int startY = STEP;
+	int endY = img.rows - 1 - STEP;
 
 	int bestMatch = INT_MAX;
 	int bestX = startX, bestY = startY;
 
-	int n = std::sqrt(img.rows * img.cols) / 2;
-
-	std::vector<std::pair<int, int>> offsets = generateRandomPairs(mask, startX, endX, startY, endY, n);
+	std::vector<std::pair<int, int>> offsets = generateRandomPairs(mask, startX, endX, startY, endY);
 
 	for (const auto& offset : offsets) {
 		double diff = computeSSE(img, mask, x, y, offset.first, offset.second);
@@ -268,14 +196,12 @@ std::pair<int, int> findBestMatch(const Mat& img, const std::vector<std::vector<
 		int width = (endX - startX) / 2;
 		int height = (endY - startY) / 2;
 
-		n = std::sqrt(height * width);
+		startX = max(STEP, bestX - width);
+		startY = max(STEP, bestY - height);
+		endX = min(img.cols - 1 - STEP, bestX + width);
+		endY = min(img.rows - 1 - STEP, bestY + height);
 
-		startX = max(DELTA, bestX - width);
-		startY = max(DELTA, bestY - height);
-		endX = min(img.cols - 1 - DELTA, bestX + width);
-		endY = min(img.rows - 1 - DELTA, bestY + height);
-
-		offsets = generateRandomPairs(mask, startX, endX, startY, endY, n);
+		offsets = generateRandomPairs(mask, startX, endX, startY, endY);
 
 		for (const auto& offset : offsets) {
 			double diff = computeSSE(img, mask, x, y, offset.first, offset.second);
