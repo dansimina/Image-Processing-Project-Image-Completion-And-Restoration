@@ -6,9 +6,10 @@
 #include <opencv2/core/utils/logger.hpp>
 #include <random>
 
-const int PATCH_SIZE = 13;
+const int PATCH_SIZE = 7;
 const int PATCH_RADIUS = PATCH_SIZE / 2;
 const int DELTA = PATCH_RADIUS / 2;
+const int GOOD_MATCH_THRESHOLD = 1000;
 
 const int STEP = 32;
 
@@ -26,6 +27,15 @@ struct SelectionData {
 	int minY = 0;
 	int maxX = 0;
 	int maxY = 0;
+};
+
+struct PatchPriority {
+	int x, y;
+	double priority;
+
+	bool operator<(const PatchPriority& other) const {
+		return priority < other.priority;
+	}
 };
 
 void MyCallBackFunc(int event, int x, int y, int flags, void* param)
@@ -130,7 +140,7 @@ std::vector<std::pair<int, int>> generateRandomPairs( const std::vector<std::vec
 }
 
 
-int computeSSE(const Mat& img, const std::vector<std::vector<bool>>& mask, int x1, int y1, int x2, int y2) {
+int computeSSE(const Mat& img, const std::vector<std::vector<bool>>& mask, int x1, int y1, int x2, int y2, int bestSoFar) {
 	int sum = 0;
 	for (int dy = -PATCH_RADIUS; dy <= PATCH_RADIUS; dy++) {
 		for (int dx = -PATCH_RADIUS; dx <= PATCH_RADIUS; dx++) {
@@ -140,33 +150,42 @@ int computeSSE(const Mat& img, const std::vector<std::vector<bool>>& mask, int x
 				sum += (p1[0] - p2[0]) * (p1[0] - p2[0])
 					+ (p1[1] - p2[1]) * (p1[1] - p2[1])
 					+ (p1[2] - p2[2]) * (p1[2] - p2[2]);
+
+				if (sum > bestSoFar) {
+					return sum;
+				}
 			}
 		}
 	}
 	return sum;
 }
 
-std::pair<int, int> propagate(const Mat& img, const std::vector<std::vector<bool>>& mask, int x, int y, int offsetX, int offsetY) {
-	const int offsets[8][2] = { {-1,0}, {1,0}, {0,-1}, {0,1}, {-1,-1}, {1,1}, {-1,1}, {1,-1} };
-	int bestSSE = computeSSE(img, mask, x, y, offsetX, offsetY);
-	int bestX = offsetX, bestY = offsetY;
+std::pair<int, int> propagate(const Mat& img, const std::vector<std::vector<bool>>& mask, int x, int y, std::vector<std::vector<std::pair<int, int>>>& offsetMap) {
+	int bestMatch = INT_MAX;
+	int bestX = -1, bestY = -1;
 
-	for (int i = 0; i < 8; i++) {
-		int nx = x + offsets[i][0];
-		int ny = y + offsets[i][1];
-		if (nx >= PATCH_RADIUS && nx < img.cols - PATCH_RADIUS && ny >= PATCH_RADIUS && ny < img.rows - PATCH_RADIUS && isValidPatch(mask, nx, ny)) {
-			int sse = computeSSE(img, mask, x, y, nx, ny);
-			if (sse < bestSSE) {
-				bestSSE = sse;
-				bestX = nx;
-				bestY = ny;
+	for (int dy = -DELTA; dy <= DELTA; dy++) {
+		for (int dx = -DELTA; dx <= DELTA; dx++) {
+			if (!(dx == 0 && dy == 0)) {
+				int offsetX = offsetMap[y + dy][x + dx].first;
+				int offsetY = offsetMap[y + dy][x + dx].second;
+
+				if (offsetX != -1 && offsetY != -1 && isValidPatch(mask, offsetX, offsetY)) {
+					int diff = computeSSE(img, mask, x, y, offsetX, offsetY, bestMatch);
+					if (diff < bestMatch) {
+						bestMatch = diff;
+						bestX = offsetX;
+						bestY = offsetY;
+					}
+				}
 			}
 		}
 	}
+
 	return { bestX, bestY };
 }
 
-std::pair<int, int> findBestMatch(const Mat& img, const std::vector<std::vector<bool>>& mask, int x, int y) {
+std::pair<int, int> findBestMatch(const Mat& img, const std::vector<std::vector<bool>>& mask, int x, int y, std::vector<std::vector<std::pair<int, int>>>& offsetMap) {
 	int startX = STEP;
 	int endX = img.cols - 1 - STEP;
 	int startY = STEP;
@@ -174,12 +193,20 @@ std::pair<int, int> findBestMatch(const Mat& img, const std::vector<std::vector<
 
 	int step = STEP;
 	int bestMatch = INT_MAX;
-	int bestX = startX, bestY = startY;
+	int bestX = -1, bestY = -1;
+
+	std::pair<int, int> result = propagate(img, mask, x, y, offsetMap);
+	bestX = result.first;
+	bestY = result.second;
+
+	if (bestMatch < GOOD_MATCH_THRESHOLD && bestX != -1 && bestY != -1) {
+		return { bestX, bestY };
+	}
 
 	std::vector<std::pair<int, int>> offsets = generateRandomPairs(mask, startX, endX, startY, endY, step);
 
 	for (const auto& offset : offsets) {
-		double diff = computeSSE(img, mask, x, y, offset.first, offset.second);
+		double diff = computeSSE(img, mask, x, y, offset.first, offset.second, bestMatch);
 		if (diff < bestMatch) {
 			bestMatch = diff;
 			bestX = offset.first;
@@ -187,9 +214,7 @@ std::pair<int, int> findBestMatch(const Mat& img, const std::vector<std::vector<
 		}
 	}
 
-	const int THRESHOLD = 0.1 * bestMatch;
-
-	for (int i = 0; i < 3; i++) {
+	for (int i = 0; i < 5; i++) {
 		int width = (endX - startX) / 4;
 		int height = (endY - startY) / 4;
 
@@ -203,7 +228,7 @@ std::pair<int, int> findBestMatch(const Mat& img, const std::vector<std::vector<
 		offsets = generateRandomPairs(mask, startX, endX, startY, endY, step);
 
 		for (const auto& offset : offsets) {
-			double diff = computeSSE(img, mask, x, y, offset.first, offset.second);
+			double diff = computeSSE(img, mask, x, y, offset.first, offset.second, bestMatch);
 			if (diff < bestMatch) {
 				bestMatch = diff;
 				bestX = offset.first;
@@ -212,11 +237,30 @@ std::pair<int, int> findBestMatch(const Mat& img, const std::vector<std::vector<
 		}
 	}
 
-	return propagate(img, mask, x, y, bestX, bestY);
+	return { bestX, bestY };
 }
 
-void completePatch(Mat& img, std::vector<std::vector<bool>>& mask, int x, int y) {
-	std::pair<int, int> offset = findBestMatch(img, mask, x, y);
+bool isBoundaryPatch(const std::vector<std::vector<bool>>& mask, int x, int y) {
+	for (int dy = -1; dy <= 1; dy++) {
+		for (int dx = -1; dx <= 1; dx++) {
+			if (!(dx == 0 && dy == 0)) {
+				int nx = x + dx;
+				int ny = y + dy;
+
+				if (!mask[ny][nx]) {
+					return true;
+				}
+			}
+		}
+	}
+
+	return false;
+}
+
+void completePatch(Mat& img, std::vector<std::vector<bool>>& mask, int x, int y, std::vector<std::vector<std::pair<int, int>>>& offsetMap) {
+	std::pair<int, int> offset = findBestMatch(img, mask, x, y, offsetMap);
+
+	offsetMap[y][x] = offset;
 
 	for (int dy = -DELTA; dy <= DELTA; dy++) {
 		for (int dx = -DELTA; dx <= DELTA; dx++) {
@@ -228,50 +272,66 @@ void completePatch(Mat& img, std::vector<std::vector<bool>>& mask, int x, int y)
 			if (mask[targetY][targetX]) {
 				img.at<Vec3b>(targetY, targetX) = img.at<Vec3b>(sourceY, sourceX);
 				mask[targetY][targetX] = false;
-			}
-		}
-	}
-
-	for (int dy = -PATCH_RADIUS; dy <= PATCH_RADIUS; dy++) {
-		for (int dx = -PATCH_RADIUS; dx <= PATCH_RADIUS; dx++) {
-			if (abs(dx) >= DELTA || abs(dy) >= DELTA) {
-				int targetY = y + dy;
-				int targetX = x + dx;
-				int sourceY = offset.second + dy;
-				int sourceX = offset.first + dx;
-
-				if (!mask[targetY][targetX]) {
-					// Calculate distance from patch center
-					double dist = sqrt(dx * dx + dy * dy) / PATCH_RADIUS;
-
-					// Calculate weight with smoother falloff
-					double weight = pow(dist, 1.5); // Adjust exponent for transition sharpness
-					weight = min(1.0, max(0.0, weight));
-
-					// Get gradient information
-					Vec3b sourcePixel = img.at<Vec3b>(sourceY, sourceX);
-					Vec3b targetPixel = img.at<Vec3b>(targetY, targetX);
-
-					// Calculate gradient-aware blending
-					for (int c = 0; c < 3; c++) {
-						// Blend with respect to local gradient
-						img.at<Vec3b>(targetY, targetX)[c] =
-							sourcePixel[c] * (1 - weight) + targetPixel[c] * weight;
-					}
-				}
+				offsetMap[y][x] = { targetX, targetY };
 			}
 		}
 	}
 }
 
+double computePriority(const std::vector<std::vector<bool>>& mask, int x, int y) {
+	double data = 0.0;
+	int boundaryPixels = 0;
+	double confidence = 0.0;
+	int totalPixels = 0;
+
+	for (int dy = -PATCH_RADIUS; dy <= PATCH_RADIUS; dy++) {
+		for (int dx = -PATCH_RADIUS; dx <= PATCH_RADIUS; dx++) {
+			totalPixels++;
+			if (!mask[y + dy][x + dx]) {
+				confidence++;
+			}
+		}
+	}
+
+	confidence /= totalPixels;
+
+	for (int dy = -PATCH_RADIUS; dy <= PATCH_RADIUS; dy++) {
+		for (int dx = -PATCH_RADIUS; dx <= PATCH_RADIUS; dx++) {
+			if (!mask[y + dy][x + dx]) {
+				for (int ny = y + dy - 1; ny <= y + dy + 1; ny++) {
+					for (int nx = x + dx - 1; nx <= x + dx + 1; nx++) {
+						if (mask[ny][nx]) {
+							data++;
+							break;
+						}
+					}
+				}
+			}
+		}
+	}
+
+	data /= totalPixels;
+
+	return confidence * data;
+}
+
 Mat imageReconstruction(Mat& img, int startX, int startY, int endX, int endY)
 {
+	int n = 0;
+
 	Mat reconstruction = img.clone();
 
-	startX = max(PATCH_RADIUS, startX);
-	startY = max(PATCH_RADIUS, startY);
-	endX = min(img.cols - 1 - PATCH_RADIUS, endX);
-	endY = min(img.rows - 1 - PATCH_RADIUS, endY);
+	std::vector<std::vector<std::pair<int, int>>> offsetMap(img.rows,
+		std::vector<std::pair<int, int>>(img.cols, { -1, -1 }));
+
+	startX = max(PATCH_RADIUS + 1, startX);
+	startY = max(PATCH_RADIUS + 1, startY);
+	endX = min(img.cols - 2 - PATCH_RADIUS, endX);
+	endY = min(img.rows - 2 - PATCH_RADIUS, endY);
+
+	if (startX + DELTA >= endX || startY + DELTA >= endY) {
+		return img;
+	}
 
 	std::vector<std::vector<bool>> mask = computeMask(img, startX, startY, endX, endY);
 
@@ -283,13 +343,58 @@ Mat imageReconstruction(Mat& img, int startX, int startY, int endX, int endY)
 		}
 	}
 	imshow("Region to Fill", reconstruction);
-	waitKey(0);
+	waitKey(1);
 
-	std::queue<std::pair<int, int>> Q;
-	Q.push({ startX + 1, startY + 1 });
-	Q.push({ endX - 1, startY + 1 });
-	Q.push({ startX + 1, endY - 1 });
-	Q.push({ endX - 1, endY - 1 });
+	std::priority_queue<PatchPriority> Q;
+
+	for (int y = startY; y <= endY; y++) {
+		for (int x = startX; x <= endX; x++) {
+			if (mask[y][x] && isBoundaryPatch(mask, x, y)) {
+				double priority = computePriority(mask, x, y);
+				Q.push({ x, y, priority });
+			}
+		}
+	}
+
+	while (!Q.empty()) {
+		auto current = Q.top();
+		Q.pop();
+		int x = current.x;
+		int y = current.y;
+
+		if (mask[y][x] && x >= startX && y >= startY && x <= endX && y <= endY) {
+			completePatch(reconstruction, mask, x, y, offsetMap);
+
+			for (int dy = -PATCH_RADIUS; dy <= PATCH_RADIUS; dy++) {
+				for (int dx = -PATCH_RADIUS; dx <= PATCH_RADIUS; dx++) {
+					int nx = current.x + dx;
+					int ny = current.y + dy;
+
+					if (mask[ny][nx] && isBoundaryPatch(mask, nx, ny)) {
+						double priority = computePriority(mask, nx, ny);
+						Q.push({ nx, ny, priority });
+					}
+				}
+			}
+		}
+
+		if (n == 20) {
+			imshow("Region to Fill", reconstruction);
+			waitKey(1);
+			n = 0;
+		}
+		n++;
+	}
+
+	/*std::queue<std::pair<int, int>> Q;
+	
+	for (int y = startY; y <= endY; y++) {
+		for (int x = startX; x <= endX; x++) {
+			if (mask[y][x] && isBoundaryPatch(mask, x, y)) {
+				Q.push({ x, y });
+			}
+		}
+	}
 
 	while (!Q.empty()) {
 		auto front = Q.front();
@@ -298,7 +403,7 @@ Mat imageReconstruction(Mat& img, int startX, int startY, int endX, int endY)
 		int y = front.second;
 
 		if (mask[y][x] && x >= startX && y >= startY && x <= endX && y <= endY) {
-			completePatch(reconstruction, mask, x, y);
+			completePatch(reconstruction, mask, x, y, offsetMap);
 
 			if (x - DELTA - 1 >= 0 && mask[y][x - DELTA - 1]) {
 				Q.push({ x - DELTA - 1, y });
@@ -313,17 +418,72 @@ Mat imageReconstruction(Mat& img, int startX, int startY, int endX, int endY)
 				Q.push({ x, y + DELTA + 1 });
 			}
 		}
-	}
+
+		if (n == 20) {
+			imshow("Region to Fill", reconstruction);
+			waitKey(1);
+			n = 0;
+		}
+		n++;
+	}*/
 
 	for (int y = startY; y <= endY; y++) {
 		for (int x = startX; x <= endX; x++) {
 			if (mask[y][x]) {
-				completePatch(reconstruction, mask, x, y);
+				completePatch(reconstruction, mask, x, y, offsetMap);
 			}
 		}
 	}
 
 	return reconstruction;
+}
+
+Mat performConvolutionOperation(Mat img, std::vector<std::vector<int>> kernel, int startX, int startY, int endX, int endY) {
+	Mat result = img.clone();
+	int kRows = kernel.size();
+	int kCols = kernel[0].size();
+	int kCenterY = kRows / 2;
+	int kCenterX = kCols / 2;
+
+	int S = 0;
+	bool lowPass = true;
+
+	for (int y = 0; y < kRows; y++) {
+		for (int x = 0; x < kCols; x++) {
+			S += kernel[y][x];
+		}
+	}
+
+	for (int y = startY; y <= endY; y++) {
+		for (int x = startX; x <= endX; x++) {
+			int valR = 0, valG = 0, valB = 0;
+			for (int m = 0; m < kRows; m++) {
+				for (int n = 0; n < kCols; n++) {
+					int ny = y + m - kCenterY;
+					int nx = x + n - kCenterX;
+
+					valB += kernel[m][n] * img.at<Vec3b>(ny, nx)[0];
+					valG += kernel[m][n] * img.at<Vec3b>(ny, nx)[1];
+					valR += kernel[m][n] * img.at<Vec3b>(ny, nx)[2];
+				}
+			}
+
+			result.at<Vec3b>(y, x) = Vec3b(valB / S, valG / S, valR / S);
+		}
+	}
+
+	return result;
+}
+
+Mat postprocessing(Mat img, int startX, int startY, int endX, int endY) {
+	std::vector<std::vector<int>> gaussianFilter = {
+		{1, 2, 1},
+		{2, 4, 2},
+		{1, 2, 1}
+	};
+
+
+	return performConvolutionOperation(img, gaussianFilter, startX, startY, endX, endY);
 }
 
 void testMouseClick()
@@ -359,6 +519,7 @@ void testMouseClick()
 			int endY = max(data.startY, data.endY);
 
 			Mat img = imageReconstruction(data.original, startX, startY, endX, endY);
+			img = postprocessing(img, startX, startY, endX, endY);
 
 			imshow("Selected Region", img);
 			waitKey(0);
