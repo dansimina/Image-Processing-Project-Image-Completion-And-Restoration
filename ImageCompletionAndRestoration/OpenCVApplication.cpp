@@ -11,6 +11,8 @@ const int PATCH_RADIUS = PATCH_SIZE / 2;
 const int DELTA = PATCH_RADIUS / 2;
 const int GOOD_MATCH_THRESHOLD = 1000;
 
+const int MAX_AREA = 360000;
+
 const int STEP = 32;
 
 wchar_t* projectPath;
@@ -278,22 +280,57 @@ void completePatch(Mat& img, std::vector<std::vector<bool>>& mask, int x, int y,
 	}
 }
 
-double computePriority(const std::vector<std::vector<bool>>& mask, int x, int y) {
+double computePriority(Mat& img, const std::vector<std::vector<bool>>& mask, int x, int y) {
 	double data = 0.0;
 	int boundaryPixels = 0;
 	double confidence = 0.0;
 	int totalPixels = 0;
 
+	int averageR = 0, averageB = 0, averageG = 0;
+
+	int sumOfSqaresErrors = 0;
+
 	for (int dy = -PATCH_RADIUS; dy <= PATCH_RADIUS; dy++) {
 		for (int dx = -PATCH_RADIUS; dx <= PATCH_RADIUS; dx++) {
 			totalPixels++;
-			if (!mask[y + dy][x + dx]) {
+
+			int ny = y + dy;
+			int nx = x + dx;
+
+			if (!mask[ny][nx]) {
 				confidence++;
+
+				averageR += img.at<Vec3b>(ny, nx)[2];
+				averageG += img.at<Vec3b>(ny, nx)[1];
+				averageB += img.at<Vec3b>(ny, nx)[0];
 			}
 		}
 	}
 
 	confidence /= totalPixels;
+
+	averageR /= totalPixels;
+	averageG /= totalPixels;
+	averageB /= totalPixels;
+
+	for (int dy = -PATCH_RADIUS; dy <= PATCH_RADIUS; dy++) {
+		for (int dx = -PATCH_RADIUS; dx <= PATCH_RADIUS; dx++) {
+			totalPixels++;
+
+			int ny = y + dy;
+			int nx = x + dx;
+
+			if (!mask[ny][nx]) {
+				confidence++;
+
+				sumOfSqaresErrors += abs(averageR - img.at<Vec3b>(ny, nx)[2]);
+				sumOfSqaresErrors += abs(averageG - img.at<Vec3b>(ny, nx)[1]);
+				sumOfSqaresErrors += abs(averageB - img.at<Vec3b>(ny, nx)[0]);
+			}
+		}
+	}
+
+	sumOfSqaresErrors /= (3 * 255 * totalPixels);
 
 	for (int dy = -PATCH_RADIUS; dy <= PATCH_RADIUS; dy++) {
 		for (int dx = -PATCH_RADIUS; dx <= PATCH_RADIUS; dx++) {
@@ -312,7 +349,7 @@ double computePriority(const std::vector<std::vector<bool>>& mask, int x, int y)
 
 	data /= totalPixels;
 
-	return confidence * data;
+	return confidence * data + sumOfSqaresErrors;
 }
 
 Mat imageReconstruction(Mat& img, int startX, int startY, int endX, int endY)
@@ -350,7 +387,7 @@ Mat imageReconstruction(Mat& img, int startX, int startY, int endX, int endY)
 	for (int y = startY; y <= endY; y++) {
 		for (int x = startX; x <= endX; x++) {
 			if (mask[y][x] && isBoundaryPatch(mask, x, y)) {
-				double priority = computePriority(mask, x, y);
+				double priority = computePriority(img, mask, x, y);
 				Q.push({ x, y, priority });
 			}
 		}
@@ -371,7 +408,7 @@ Mat imageReconstruction(Mat& img, int startX, int startY, int endX, int endY)
 					int ny = current.y + dy;
 
 					if (mask[ny][nx] && isBoundaryPatch(mask, nx, ny)) {
-						double priority = computePriority(mask, nx, ny);
+						double priority = computePriority(img, mask, nx, ny);
 						Q.push({ nx, ny, priority });
 					}
 				}
@@ -385,47 +422,6 @@ Mat imageReconstruction(Mat& img, int startX, int startY, int endX, int endY)
 		}
 		n++;
 	}
-
-	/*std::queue<std::pair<int, int>> Q;
-	
-	for (int y = startY; y <= endY; y++) {
-		for (int x = startX; x <= endX; x++) {
-			if (mask[y][x] && isBoundaryPatch(mask, x, y)) {
-				Q.push({ x, y });
-			}
-		}
-	}
-
-	while (!Q.empty()) {
-		auto front = Q.front();
-		Q.pop();
-		int x = front.first;
-		int y = front.second;
-
-		if (mask[y][x] && x >= startX && y >= startY && x <= endX && y <= endY) {
-			completePatch(reconstruction, mask, x, y, offsetMap);
-
-			if (x - DELTA - 1 >= 0 && mask[y][x - DELTA - 1]) {
-				Q.push({ x - DELTA - 1, y });
-			}
-			if (y - DELTA - 1 >= 0 && mask[y - DELTA - 1][x]) {
-				Q.push({ x, y - DELTA - 1 });
-			}
-			if (x + DELTA + 1 < reconstruction.cols && mask[y][x + DELTA + 1]) {
-				Q.push({ x + DELTA + 1, y });
-			}
-			if (y + DELTA + 1 < reconstruction.rows && mask[y + DELTA + 1][x]) {
-				Q.push({ x, y + DELTA + 1 });
-			}
-		}
-
-		if (n == 20) {
-			imshow("Region to Fill", reconstruction);
-			waitKey(1);
-			n = 0;
-		}
-		n++;
-	}*/
 
 	for (int y = startY; y <= endY; y++) {
 		for (int x = startX; x <= endX; x++) {
@@ -486,6 +482,23 @@ Mat postprocessing(Mat img, int startX, int startY, int endX, int endY) {
 	return performConvolutionOperation(img, gaussianFilter, startX, startY, endX, endY);
 }
 
+Mat preprocessing(Mat img) {
+	int area = img.rows * img.cols;
+	if (area < MAX_AREA) {
+		return img;
+	}
+
+	double scale = sqrt((double)MAX_AREA / area);
+
+	int newWidth = cvRound(img.cols * scale);
+	int newHeight = cvRound(img.rows * scale);
+
+	Mat resized;
+	resize(img, resized, Size(newWidth, newHeight), 0, 0, INTER_AREA);
+
+	return resized;
+}
+
 void testMouseClick()
 {
 	// Read image from file 
@@ -495,6 +508,7 @@ void testMouseClick()
 		// Set up the selection data
 		SelectionData data;
 		data.original = imread(fname);
+		data.original = preprocessing(data.original);
 		data.minX = PATCH_SIZE / 2;
 		data.minY = PATCH_SIZE / 2;
 		data.maxX = data.original.cols - PATCH_SIZE / 2 - 1;
