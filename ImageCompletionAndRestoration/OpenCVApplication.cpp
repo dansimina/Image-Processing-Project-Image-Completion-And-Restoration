@@ -285,10 +285,10 @@ double computePriority(Mat& img, const std::vector<std::vector<bool>>& mask, int
 	int boundaryPixels = 0;
 	double confidence = 0.0;
 	int totalPixels = 0;
+	int validPixels = 0;
 
 	int averageR = 0, averageB = 0, averageG = 0;
-
-	int sumOfSqaresErrors = 0;
+	int meanAbsoluteError = 0;
 
 	for (int dy = -PATCH_RADIUS; dy <= PATCH_RADIUS; dy++) {
 		for (int dx = -PATCH_RADIUS; dx <= PATCH_RADIUS; dx++) {
@@ -298,7 +298,7 @@ double computePriority(Mat& img, const std::vector<std::vector<bool>>& mask, int
 			int nx = x + dx;
 
 			if (!mask[ny][nx]) {
-				confidence++;
+				validPixels++;
 
 				averageR += img.at<Vec3b>(ny, nx)[2];
 				averageG += img.at<Vec3b>(ny, nx)[1];
@@ -307,7 +307,7 @@ double computePriority(Mat& img, const std::vector<std::vector<bool>>& mask, int
 		}
 	}
 
-	confidence /= totalPixels;
+	confidence = (double) validPixels / totalPixels;
 
 	averageR /= totalPixels;
 	averageG /= totalPixels;
@@ -315,22 +315,18 @@ double computePriority(Mat& img, const std::vector<std::vector<bool>>& mask, int
 
 	for (int dy = -PATCH_RADIUS; dy <= PATCH_RADIUS; dy++) {
 		for (int dx = -PATCH_RADIUS; dx <= PATCH_RADIUS; dx++) {
-			totalPixels++;
-
 			int ny = y + dy;
 			int nx = x + dx;
 
 			if (!mask[ny][nx]) {
-				confidence++;
-
-				sumOfSqaresErrors += abs(averageR - img.at<Vec3b>(ny, nx)[2]);
-				sumOfSqaresErrors += abs(averageG - img.at<Vec3b>(ny, nx)[1]);
-				sumOfSqaresErrors += abs(averageB - img.at<Vec3b>(ny, nx)[0]);
+				meanAbsoluteError += abs(averageR - img.at<Vec3b>(ny, nx)[2]);
+				meanAbsoluteError += abs(averageG - img.at<Vec3b>(ny, nx)[1]);
+				meanAbsoluteError += abs(averageB - img.at<Vec3b>(ny, nx)[0]);
 			}
 		}
 	}
 
-	sumOfSqaresErrors /= (3 * 255 * totalPixels);
+	meanAbsoluteError /= (3 * 255 * totalPixels);
 
 	for (int dy = -PATCH_RADIUS; dy <= PATCH_RADIUS; dy++) {
 		for (int dx = -PATCH_RADIUS; dx <= PATCH_RADIUS; dx++) {
@@ -349,7 +345,7 @@ double computePriority(Mat& img, const std::vector<std::vector<bool>>& mask, int
 
 	data /= totalPixels;
 
-	return confidence * data + sumOfSqaresErrors;
+	return confidence * data + meanAbsoluteError;
 }
 
 Mat imageReconstruction(Mat& img, int startX, int startY, int endX, int endY)
