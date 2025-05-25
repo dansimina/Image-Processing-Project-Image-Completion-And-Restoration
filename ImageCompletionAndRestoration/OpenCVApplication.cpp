@@ -5,6 +5,17 @@
 #include "common.h"
 #include <opencv2/core/utils/logger.hpp>
 #include <random>
+#include <conio.h>  // For _getch() on Windows
+#include <ctime>
+#include <string>
+#include <direct.h>  
+#include <sys/stat.h>
+
+// Arrow key codes for Windows
+#define KEY_UP 72
+#define KEY_DOWN 80
+#define KEY_ENTER 13
+#define KEY_ESC 27
 
 const int PATCH_SIZE = 7;
 const int PATCH_RADIUS = PATCH_SIZE / 2;
@@ -116,28 +127,33 @@ bool isValidPatch(const std::vector<std::vector<bool>>& mask, int x, int y) {
 	return true;
 }
 
-std::vector<std::pair<int, int>> generateRandomPairs( const std::vector<std::vector<bool>>& mask, int searchStartX, int searchEndX, int searchStartY, int searchEndY, int step)
-{
+std::vector<std::pair<int, int>> generateRandomPairs(const std::vector<std::vector<bool>>& mask, int searchStartX, int searchEndX, int searchStartY, int searchEndY, int step) {
 	if (mask.empty() || mask[0].empty() || searchStartX > searchEndX || searchStartY > searchEndY) {
 		return {};
 	}
 
 	std::vector<std::pair<int, int>> result;
-	const int RANGE = STEP / 2 - PATCH_RADIUS;
+	const int RANGE = max(1, STEP / 2 - PATCH_RADIUS);
 
-	srand(time(0));
+	std::random_device rd;
+	std::mt19937 gen(rd());
+	std::uniform_int_distribution<> dis(-RANGE, RANGE);
 
 	for (int y = searchStartY; y <= searchEndY; y += step) {
 		for (int x = searchStartX; x <= searchEndX; x += step) {
-			int dx = x + (rand() % (RANGE * 2)) - RANGE;
-			int dy = y + (rand() % (RANGE * 2)) - RANGE;
+			for (int attempts = 0; attempts < 3; attempts++) {
+				int dx = x + dis(gen);
+				int dy = y + dis(gen);
 
-			if (isValidPatch(mask, dx, dy)) {
-				result.push_back({ dx, dy });
+				if (dx >= PATCH_RADIUS && dx < mask[0].size() - PATCH_RADIUS &&
+					dy >= PATCH_RADIUS && dy < mask.size() - PATCH_RADIUS &&
+					isValidPatch(mask, dx, dy)) {
+					result.push_back({ dx, dy });
+				}
 			}
 		}
 	}
-	
+
 	return result;
 }
 
@@ -198,8 +214,11 @@ std::pair<int, int> findBestMatch(const Mat& img, const std::vector<std::vector<
 	int bestX = -1, bestY = -1;
 
 	std::pair<int, int> result = propagate(img, mask, x, y, offsetMap);
-	bestX = result.first;
-	bestY = result.second;
+	if (result.first != -1) {
+		bestMatch = computeSSE(img, mask, x, y, result.first, result.second, INT_MAX);
+		bestX = result.first;
+		bestY = result.second;
+	}
 
 	if (bestMatch < GOOD_MATCH_THRESHOLD && bestX != -1 && bestY != -1) {
 		return { bestX, bestY };
@@ -274,7 +293,7 @@ void completePatch(Mat& img, std::vector<std::vector<bool>>& mask, int x, int y,
 			if (mask[targetY][targetX]) {
 				img.at<Vec3b>(targetY, targetX) = img.at<Vec3b>(sourceY, sourceX);
 				mask[targetY][targetX] = false;
-				offsetMap[y][x] = { targetX, targetY };
+				offsetMap[targetY][targetX] = { sourceX, sourceY };
 			}
 		}
 	}
@@ -309,9 +328,14 @@ double computePriority(Mat& img, const std::vector<std::vector<bool>>& mask, int
 
 	confidence = (double) validPixels / totalPixels;
 
-	averageR /= totalPixels;
-	averageG /= totalPixels;
-	averageB /= totalPixels;
+	if (validPixels > 0) {
+		averageR /= validPixels;
+		averageG /= validPixels;
+		averageB /= validPixels;
+	}
+	else {
+		return 0.0;
+	}
 
 	for (int dy = -PATCH_RADIUS; dy <= PATCH_RADIUS; dy++) {
 		for (int dx = -PATCH_RADIUS; dx <= PATCH_RADIUS; dx++) {
@@ -326,7 +350,7 @@ double computePriority(Mat& img, const std::vector<std::vector<bool>>& mask, int
 		}
 	}
 
-	meanAbsoluteError /= (3 * 255 * totalPixels);
+	meanAbsoluteError /= (3 * 255 * validPixels);
 
 	for (int dy = -PATCH_RADIUS; dy <= PATCH_RADIUS; dy++) {
 		for (int dx = -PATCH_RADIUS; dx <= PATCH_RADIUS; dx++) {
@@ -345,7 +369,7 @@ double computePriority(Mat& img, const std::vector<std::vector<bool>>& mask, int
 
 	data /= totalPixels;
 
-	return confidence * data + meanAbsoluteError;
+	return confidence * data - meanAbsoluteError;
 }
 
 Mat imageReconstruction(Mat& img, int startX, int startY, int endX, int endY)
@@ -392,6 +416,7 @@ Mat imageReconstruction(Mat& img, int startX, int startY, int endX, int endY)
 	while (!Q.empty()) {
 		auto current = Q.top();
 		Q.pop();
+
 		int x = current.x;
 		int y = current.y;
 
@@ -411,7 +436,7 @@ Mat imageReconstruction(Mat& img, int startX, int startY, int endX, int endY)
 			}
 		}
 
-		if (n == 20) {
+		if (n == 10) {
 			imshow("Region to Fill", reconstruction);
 			waitKey(1);
 			n = 0;
@@ -438,7 +463,6 @@ Mat performConvolutionOperation(Mat img, std::vector<std::vector<int>> kernel, i
 	int kCenterX = kCols / 2;
 
 	int S = 0;
-	bool lowPass = true;
 
 	for (int y = 0; y < kRows; y++) {
 		for (int x = 0; x < kCols; x++) {
@@ -469,9 +493,9 @@ Mat performConvolutionOperation(Mat img, std::vector<std::vector<int>> kernel, i
 
 Mat postprocessing(Mat img, int startX, int startY, int endX, int endY) {
 	std::vector<std::vector<int>> gaussianFilter = {
-		{1, 2, 1},
-		{2, 4, 2},
-		{1, 2, 1}
+		{1, 1, 1},
+		{1, 8, 1},
+		{1, 1, 1}
 	};
 
 
@@ -493,6 +517,25 @@ Mat preprocessing(Mat img) {
 	resize(img, resized, Size(newWidth, newHeight), 0, 0, INTER_AREA);
 
 	return resized;
+}
+
+void saveImage(cv::Mat img) {
+	time_t now = time(0);
+	char timeStr[100];
+	strftime(timeStr, sizeof(timeStr), "%Y%m%d_%H%M%S", localtime(&now));
+
+	_mkdir("MyImages");  // Creates directory if it doesn't exist
+
+	std::string filename = "MyImages/image_" + std::string(timeStr) + ".bmp";
+
+	bool success = imwrite(filename, img);
+	if (success) {
+		std::cout << "Image saved as " << filename << std::endl;
+	}
+	else {
+		std::cout << "Failed to save image: " << filename << std::endl;
+	}
+	_getch();
 }
 
 void testMouseClick()
@@ -531,34 +574,95 @@ void testMouseClick()
 			Mat img = imageReconstruction(data.original, startX, startY, endX, endY);
 			img = postprocessing(img, startX, startY, endX, endY);
 
-			imshow("Selected Region", img);
+			imshow("New image", img);
 			waitKey(0);
+
+			char c;
+			std::cout << "Save the new image? (y/n)";
+			std::cin >> c;
+
+			if (c == 'y') {
+				saveImage(img);
+			}
 		}
 	}
 }
 
+int displayMenu() {
+	const char* menuItems[] = { "START", "EXIT" };
+	const int numItems = 2;
+	int selectedOption = 0;
 
-int main()
-{
+	while (true) {
+		system("cls");
+		cv::destroyAllWindows();
+
+		std::cout << "===== OpenCV Image Processing Menu =====\n\n";
+
+		for (int i = 0; i < numItems; i++) {
+			if (i == selectedOption) {
+				std::cout << " > " << menuItems[i] << " <\n";
+			}
+			else {
+				std::cout << "   " << menuItems[i] << "\n";
+			}
+		}
+
+		std::cout << "\nUse UP/DOWN arrows to navigate, ENTER to select, ESC to exit\n";
+
+		int key = _getch();
+
+		if (key == 224) {
+			key = _getch();  
+
+			switch (key) {
+			case KEY_UP:
+				selectedOption = (selectedOption - 1 + numItems) % numItems;
+				break;
+
+			case KEY_DOWN:
+				selectedOption = (selectedOption + 1) % numItems;
+				break;
+			}
+		}
+		else {
+			switch (key) {
+			case KEY_ENTER:
+				return selectedOption + 1;  
+
+			case KEY_ESC:
+				return 0;  
+			}
+		}
+	}
+}
+
+int main() {
 	cv::utils::logging::setLogLevel(cv::utils::logging::LOG_LEVEL_FATAL);
 	projectPath = _wgetcwd(0, 0);
 
-	int op;
-	do
-	{
-		system("cls");
-		destroyAllWindows();
-		printf("Menu:\n");
-		printf(" 1 - Demo\n");
-		printf(" 0 - Exit\n\n");
-		printf("Option: ");
-		scanf("%d", &op);
-		switch (op)
-		{
-		case 1:
+	int op = 0;
+
+	do {
+		op = displayMenu();  // Call 
+
+		switch (op) {
+		case 1:  // START
 			testMouseClick();
+			break;
+
+		case 2:  // EXIT
+			op = 0;  
+			break;
+
+		case 0:  // ESC pressed
 			break;
 		}
 	} while (op != 0);
+
+	system("cls");
+	cv::destroyAllWindows();
+	std::cout << "Application closed. Thank you!\n";
+
 	return 0;
 }
