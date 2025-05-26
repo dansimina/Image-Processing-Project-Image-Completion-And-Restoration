@@ -5,7 +5,7 @@
 #include "common.h"
 #include <opencv2/core/utils/logger.hpp>
 #include <random>
-#include <conio.h>  // For _getch() on Windows
+#include <conio.h>
 #include <ctime>
 #include <string>
 #include <direct.h>  
@@ -20,7 +20,7 @@
 const int PATCH_SIZE = 7;
 const int PATCH_RADIUS = PATCH_SIZE / 2;
 const int DELTA = PATCH_RADIUS / 2;
-const int GOOD_MATCH_THRESHOLD = 1000;
+const int GOOD_MATCH_THRESHOLD = 500;
 
 const int MAX_AREA = 360000;
 
@@ -141,7 +141,7 @@ std::vector<std::pair<int, int>> generateRandomPairs(const std::vector<std::vect
 
 	for (int y = searchStartY; y <= searchEndY; y += step) {
 		for (int x = searchStartX; x <= searchEndX; x += step) {
-			for (int attempts = 0; attempts < 3; attempts++) {
+			for (int attempts = 0; attempts < 5; attempts++) {
 				int dx = x + dis(gen);
 				int dy = y + dis(gen);
 
@@ -369,7 +369,7 @@ double computePriority(Mat& img, const std::vector<std::vector<bool>>& mask, int
 
 	data /= totalPixels;
 
-	return confidence * data - meanAbsoluteError;
+	return confidence * data + (1 - meanAbsoluteError);
 }
 
 Mat imageReconstruction(Mat& img, int startX, int startY, int endX, int endY)
