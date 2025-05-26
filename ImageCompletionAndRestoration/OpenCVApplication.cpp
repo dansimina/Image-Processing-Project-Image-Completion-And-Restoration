@@ -1,7 +1,4 @@
-﻿// OpenCVApplication.cpp : Defines the entry point for the console application.
-//
-
-#include "stdafx.h"
+﻿#include "stdafx.h"
 #include "common.h"
 #include <opencv2/core/utils/logger.hpp>
 #include <random>
@@ -11,7 +8,6 @@
 #include <direct.h>  
 #include <sys/stat.h>
 
-// Arrow key codes for Windows
 #define KEY_UP 72
 #define KEY_DOWN 80
 #define KEY_ENTER 13
@@ -21,9 +17,7 @@ const int PATCH_SIZE = 7;
 const int PATCH_RADIUS = PATCH_SIZE / 2;
 const int DELTA = PATCH_RADIUS / 2;
 const int GOOD_MATCH_THRESHOLD = 500;
-
 const int MAX_AREA = 360000;
-
 const int STEP = 32;
 
 wchar_t* projectPath;
@@ -87,13 +81,19 @@ void MyCallBackFunc(int event, int x, int y, int flags, void* param)
 			data->endX = x;
 			data->endY = y;
 
-			img = data->original.clone();
+			int startX = min(data->startX, data->endX);
+			int startY = min(data->startY, data->endY);
+			int endX = max(data->startX, data->endX);
+			int endY = max(data->startY, data->endY);
 
-			rectangle(img, Point(data->startX, data->startY),
-				Point(data->endX, data->endY),
-				Scalar(0, 255, 0), 2);
+			if (startX >= 0 && startY >= 0 &&
+				endX < data->original.cols && endY < data->original.rows &&
+				endX > startX && endY > startY) {
 
-			imshow("My Window", img);
+				img = data->original.clone();
+				rectangle(img, Point(startX, startY), Point(endX, endY), Scalar(0, 255, 0), 2);
+				imshow("My Window", img);
+			}
 		}
 	}
 }
@@ -116,6 +116,11 @@ std::vector<std::vector<bool>> computeMask(Mat img, int startX, int startY, int 
 }
 
 bool isValidPatch(const std::vector<std::vector<bool>>& mask, int x, int y) {
+	if (y - PATCH_RADIUS < 0 || y + PATCH_RADIUS >= mask.size() ||
+		x - PATCH_RADIUS < 0 || x + PATCH_RADIUS >= mask[0].size()) {
+		return false;
+	}
+
 	for (int dy = -PATCH_RADIUS; dy <= PATCH_RADIUS; dy++) {
 		for (int dx = -PATCH_RADIUS; dx <= PATCH_RADIUS; dx++) {
 			if (mask[y + dy][x + dx]) {
@@ -157,12 +162,18 @@ std::vector<std::pair<int, int>> generateRandomPairs(const std::vector<std::vect
 	return result;
 }
 
-
 int computeSSE(const Mat& img, const std::vector<std::vector<bool>>& mask, int x1, int y1, int x2, int y2, int bestSoFar) {
 	int sum = 0;
 	for (int dy = -PATCH_RADIUS; dy <= PATCH_RADIUS; dy++) {
 		for (int dx = -PATCH_RADIUS; dx <= PATCH_RADIUS; dx++) {
-			if (!mask[y1 + dy][x1 + dx]) { 
+			int maskY = y1 + dy;
+			int maskX = x1 + dx;
+
+			if (maskY < 0 || maskY >= mask.size() || maskX < 0 || maskX >= mask[0].size()) {
+				continue;
+			}
+
+			if (!mask[maskY][maskX]) {
 				const Vec3b& p1 = img.at<Vec3b>(y1 + dy, x1 + dx);
 				const Vec3b& p2 = img.at<Vec3b>(y2 + dy, x2 + dx);
 				sum += (p1[0] - p2[0]) * (p1[0] - p2[0])
@@ -185,15 +196,22 @@ std::pair<int, int> propagate(const Mat& img, const std::vector<std::vector<bool
 	for (int dy = -DELTA; dy <= DELTA; dy++) {
 		for (int dx = -DELTA; dx <= DELTA; dx++) {
 			if (!(dx == 0 && dy == 0)) {
-				int offsetX = offsetMap[y + dy][x + dx].first;
-				int offsetY = offsetMap[y + dy][x + dx].second;
+				int checkY = y + dy;
+				int checkX = x + dx;
 
-				if (offsetX != -1 && offsetY != -1 && isValidPatch(mask, offsetX, offsetY)) {
-					int diff = computeSSE(img, mask, x, y, offsetX, offsetY, bestMatch);
-					if (diff < bestMatch) {
-						bestMatch = diff;
-						bestX = offsetX;
-						bestY = offsetY;
+				if (checkY >= 0 && checkY < offsetMap.size() &&
+					checkX >= 0 && checkX < offsetMap[0].size()) {
+
+					int offsetX = offsetMap[checkY][checkX].first;
+					int offsetY = offsetMap[checkY][checkX].second;
+
+					if (offsetX != -1 && offsetY != -1 && isValidPatch(mask, offsetX, offsetY)) {
+						int diff = computeSSE(img, mask, x, y, offsetX, offsetY, bestMatch);
+						if (diff < bestMatch) {
+							bestMatch = diff;
+							bestX = offsetX;
+							bestY = offsetY;
+						}
 					}
 				}
 			}
@@ -268,6 +286,10 @@ bool isBoundaryPatch(const std::vector<std::vector<bool>>& mask, int x, int y) {
 				int nx = x + dx;
 				int ny = y + dy;
 
+				if (ny < 0 || ny >= mask.size() || nx < 0 || nx >= mask[0].size()) {
+					continue;
+				}
+
 				if (!mask[ny][nx]) {
 					return true;
 				}
@@ -281,7 +303,9 @@ bool isBoundaryPatch(const std::vector<std::vector<bool>>& mask, int x, int y) {
 void completePatch(Mat& img, std::vector<std::vector<bool>>& mask, int x, int y, std::vector<std::vector<std::pair<int, int>>>& offsetMap) {
 	std::pair<int, int> offset = findBestMatch(img, mask, x, y, offsetMap);
 
-	offsetMap[y][x] = offset;
+	if (y >= 0 && y < offsetMap.size() && x >= 0 && x < offsetMap[0].size()) {
+		offsetMap[y][x] = offset;
+	}
 
 	for (int dy = -DELTA; dy <= DELTA; dy++) {
 		for (int dx = -DELTA; dx <= DELTA; dx++) {
@@ -290,10 +314,16 @@ void completePatch(Mat& img, std::vector<std::vector<bool>>& mask, int x, int y,
 			int sourceY = offset.second + dy;
 			int sourceX = offset.first + dx;
 
-			if (mask[targetY][targetX]) {
+			if (targetY >= 0 && targetY < mask.size() &&
+				targetX >= 0 && targetX < mask[0].size() &&
+				mask[targetY][targetX]) {
+
 				img.at<Vec3b>(targetY, targetX) = img.at<Vec3b>(sourceY, sourceX);
 				mask[targetY][targetX] = false;
-				offsetMap[targetY][targetX] = { sourceX, sourceY };
+				if (targetY >= 0 && targetY < offsetMap.size() &&
+					targetX >= 0 && targetX < offsetMap[0].size()) {
+					offsetMap[targetY][targetX] = { sourceX, sourceY };
+				}
 			}
 		}
 	}
@@ -311,14 +341,17 @@ double computePriority(Mat& img, const std::vector<std::vector<bool>>& mask, int
 
 	for (int dy = -PATCH_RADIUS; dy <= PATCH_RADIUS; dy++) {
 		for (int dx = -PATCH_RADIUS; dx <= PATCH_RADIUS; dx++) {
-			totalPixels++;
-
 			int ny = y + dy;
 			int nx = x + dx;
 
+			if (ny < 0 || ny >= mask.size() || nx < 0 || nx >= mask[0].size()) {
+				continue;
+			}
+
+			totalPixels++;
+
 			if (!mask[ny][nx]) {
 				validPixels++;
-
 				averageR += img.at<Vec3b>(ny, nx)[2];
 				averageG += img.at<Vec3b>(ny, nx)[1];
 				averageB += img.at<Vec3b>(ny, nx)[0];
@@ -326,7 +359,11 @@ double computePriority(Mat& img, const std::vector<std::vector<bool>>& mask, int
 		}
 	}
 
-	confidence = (double) validPixels / totalPixels;
+	if (totalPixels == 0) {
+		return 0.0;
+	}
+
+	confidence = (double)validPixels / totalPixels;
 
 	if (validPixels > 0) {
 		averageR /= validPixels;
@@ -342,6 +379,10 @@ double computePriority(Mat& img, const std::vector<std::vector<bool>>& mask, int
 			int ny = y + dy;
 			int nx = x + dx;
 
+			if (ny < 0 || ny >= mask.size() || nx < 0 || nx >= mask[0].size()) {
+				continue;
+			}
+
 			if (!mask[ny][nx]) {
 				meanAbsoluteError += abs(averageR - img.at<Vec3b>(ny, nx)[2]);
 				meanAbsoluteError += abs(averageG - img.at<Vec3b>(ny, nx)[1]);
@@ -350,16 +391,27 @@ double computePriority(Mat& img, const std::vector<std::vector<bool>>& mask, int
 		}
 	}
 
-	meanAbsoluteError /= (3 * 255 * validPixels);
+	if (validPixels > 0) {
+		meanAbsoluteError /= (3 * 255 * validPixels);
+	}
 
 	for (int dy = -PATCH_RADIUS; dy <= PATCH_RADIUS; dy++) {
 		for (int dx = -PATCH_RADIUS; dx <= PATCH_RADIUS; dx++) {
-			if (!mask[y + dy][x + dx]) {
-				for (int ny = y + dy - 1; ny <= y + dy + 1; ny++) {
-					for (int nx = x + dx - 1; nx <= x + dx + 1; nx++) {
-						if (mask[ny][nx]) {
-							data++;
-							break;
+			int ny = y + dy;
+			int nx = x + dx;
+
+			if (ny < 0 || ny >= mask.size() || nx < 0 || nx >= mask[0].size()) {
+				continue;
+			}
+
+			if (!mask[ny][nx]) {
+				for (int nny = ny - 1; nny <= ny + 1; nny++) {
+					for (int nnx = nx - 1; nnx <= nx + 1; nnx++) {
+						if (nny >= 0 && nny < mask.size() && nnx >= 0 && nnx < mask[0].size()) {
+							if (mask[nny][nnx]) {
+								data++;
+								break;
+							}
 						}
 					}
 				}
@@ -367,7 +419,9 @@ double computePriority(Mat& img, const std::vector<std::vector<bool>>& mask, int
 		}
 	}
 
-	data /= totalPixels;
+	if (totalPixels > 0) {
+		data /= totalPixels;
+	}
 
 	return confidence * data + (1 - meanAbsoluteError);
 }
@@ -394,7 +448,7 @@ Mat imageReconstruction(Mat& img, int startX, int startY, int endX, int endY)
 
 	for (int y = startY + 1; y <= endY - 1; y++) {
 		for (int x = startX + 1; x <= endX - 1; x++) {
-			if (mask[y][x]) {
+			if (y >= 0 && y < mask.size() && x >= 0 && x < mask[0].size() && mask[y][x]) {
 				reconstruction.at<Vec3b>(y, x) = Vec3b(0, 0, 255);
 			}
 		}
@@ -406,7 +460,8 @@ Mat imageReconstruction(Mat& img, int startX, int startY, int endX, int endY)
 
 	for (int y = startY; y <= endY; y++) {
 		for (int x = startX; x <= endX; x++) {
-			if (mask[y][x] && isBoundaryPatch(mask, x, y)) {
+			if (y >= 0 && y < mask.size() && x >= 0 && x < mask[0].size() &&
+				mask[y][x] && isBoundaryPatch(mask, x, y)) {
 				double priority = computePriority(img, mask, x, y);
 				Q.push({ x, y, priority });
 			}
@@ -420,7 +475,7 @@ Mat imageReconstruction(Mat& img, int startX, int startY, int endX, int endY)
 		int x = current.x;
 		int y = current.y;
 
-		if (mask[y][x] && x >= startX && y >= startY && x <= endX && y <= endY) {
+		if (x >= startX && y >= startY && x <= endX && y <= endY && y >= 0 && y < mask.size() && x >= 0 && x < mask[0].size() && mask[y][x]) {
 			completePatch(reconstruction, mask, x, y, offsetMap);
 
 			for (int dy = -PATCH_RADIUS; dy <= PATCH_RADIUS; dy++) {
@@ -428,7 +483,8 @@ Mat imageReconstruction(Mat& img, int startX, int startY, int endX, int endY)
 					int nx = current.x + dx;
 					int ny = current.y + dy;
 
-					if (mask[ny][nx] && isBoundaryPatch(mask, nx, ny)) {
+					if (ny >= 0 && ny < mask.size() && nx >= 0 && nx < mask[0].size() &&
+						mask[ny][nx] && isBoundaryPatch(mask, nx, ny)) {
 						double priority = computePriority(img, mask, nx, ny);
 						Q.push({ nx, ny, priority });
 					}
@@ -446,7 +502,8 @@ Mat imageReconstruction(Mat& img, int startX, int startY, int endX, int endY)
 
 	for (int y = startY; y <= endY; y++) {
 		for (int x = startX; x <= endX; x++) {
-			if (mask[y][x]) {
+			if (y >= 0 && y < mask.size() && x >= 0 && x < mask[0].size() &&
+				mask[y][x]) {
 				completePatch(reconstruction, mask, x, y, offsetMap);
 			}
 		}
@@ -498,7 +555,6 @@ Mat postprocessing(Mat img, int startX, int startY, int endX, int endY) {
 		{1, 1, 1}
 	};
 
-
 	return performConvolutionOperation(img, gaussianFilter, startX, startY, endX, endY);
 }
 
@@ -524,7 +580,7 @@ void saveImage(cv::Mat img) {
 	char timeStr[100];
 	strftime(timeStr, sizeof(timeStr), "%Y%m%d_%H%M%S", localtime(&now));
 
-	_mkdir("MyImages");  // Creates directory if it doesn't exist
+	_mkdir("MyImages");
 
 	std::string filename = "MyImages/image_" + std::string(timeStr) + ".bmp";
 
@@ -540,11 +596,9 @@ void saveImage(cv::Mat img) {
 
 void testMouseClick()
 {
-	// Read image from file 
 	char fname[MAX_PATH];
 	while (openFileDlg(fname))
 	{
-		// Set up the selection data
 		SelectionData data;
 		data.original = imread(fname);
 		data.original = preprocessing(data.original);
@@ -553,16 +607,12 @@ void testMouseClick()
 		data.maxX = data.original.cols - PATCH_SIZE / 2 - 1;
 		data.maxY = data.original.rows - PATCH_SIZE / 2 - 1;
 
-		// Create a window
 		namedWindow("My Window", 1);
 
-		// Set the callback function for any mouse event
 		setMouseCallback("My Window", MyCallBackFunc, &data);
 
-		// Show the original image
 		imshow("My Window", data.original);
 
-		// Wait until user press some key
 		waitKey(0);
 
 		if (data.selected) {
@@ -578,7 +628,7 @@ void testMouseClick()
 			waitKey(0);
 
 			char c;
-			std::cout << "Save the new image? (y/n)";
+			std::cout << "Save the new image? (y/n)\n";
 			std::cin >> c;
 
 			if (c == 'y') {
@@ -613,7 +663,7 @@ int displayMenu() {
 		int key = _getch();
 
 		if (key == 224) {
-			key = _getch();  
+			key = _getch();
 
 			switch (key) {
 			case KEY_UP:
@@ -628,10 +678,10 @@ int displayMenu() {
 		else {
 			switch (key) {
 			case KEY_ENTER:
-				return selectedOption + 1;  
+				return selectedOption + 1;
 
 			case KEY_ESC:
-				return 0;  
+				return 0;
 			}
 		}
 	}
@@ -644,18 +694,18 @@ int main() {
 	int op = 0;
 
 	do {
-		op = displayMenu();  // Call 
+		op = displayMenu();
 
 		switch (op) {
-		case 1:  // START
+		case 1:
 			testMouseClick();
 			break;
 
-		case 2:  // EXIT
-			op = 0;  
+		case 2:
+			op = 0;
 			break;
 
-		case 0:  // ESC pressed
+		case 0:
 			break;
 		}
 	} while (op != 0);
