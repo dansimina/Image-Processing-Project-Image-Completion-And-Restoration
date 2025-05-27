@@ -432,8 +432,7 @@ Mat imageReconstruction(Mat& img, int startX, int startY, int endX, int endY)
 
 	Mat reconstruction = img.clone();
 
-	std::vector<std::vector<std::pair<int, int>>> offsetMap(img.rows,
-		std::vector<std::pair<int, int>>(img.cols, { -1, -1 }));
+	std::vector<std::vector<std::pair<int, int>>> offsetMap(img.rows, std::vector<std::pair<int, int>>(img.cols, { -1, -1 }));
 
 	startX = max(PATCH_RADIUS + 1, startX);
 	startY = max(PATCH_RADIUS + 1, startY);
@@ -463,6 +462,11 @@ Mat imageReconstruction(Mat& img, int startX, int startY, int endX, int endY)
 			if (y >= 0 && y < mask.size() && x >= 0 && x < mask[0].size() &&
 				mask[y][x] && isBoundaryPatch(mask, x, y)) {
 				double priority = computePriority(img, mask, x, y);
+
+				if ((x == startX && y == startY) || (x == startX && y == endY) || (x == endX && y == startY) || (x == endX && y == endY)) {
+					priority += 0.01;
+				}
+
 				Q.push({ x, y, priority });
 			}
 		}
