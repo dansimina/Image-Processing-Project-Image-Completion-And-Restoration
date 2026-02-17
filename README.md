@@ -132,29 +132,26 @@ A **3×3 Gaussian filter** is applied to the filled region to reduce block artif
 
 Each test shows: **original image** → **selected region** → **reconstructed result**.
 
-### Test 1 — Stacked Stones
-Removing the topmost stone from a balanced rock arrangement. The algorithm fills it with sky and blurred background texture.
+### Test 1
 
-![Test 1 - Before](tests/test1_before.jpg)
-![Test 1 - Selected Region](tests/test1_selected_region.jpg)
-![Test 1 - After](tests/test1_after.jpg)
-
----
-
-### Test 2 — Wooden Fence
-Removing a fence post from a structured scene with strong repeating patterns.
-
-![Test 2 - Before](tests/test2_before.jpg)
-![Test 2 - Selected Region](tests/test2_selected_region.jpg)
-![Test 2 - After](tests/test2_after.jpg)
+![Test 1 - Before](tests/test1_before.png)
+![Test 1 - Selected Region](tests/test1_selected_region.png)
+![Test 1 - After](tests/test1_after.png)
 
 ---
 
-### Test 3 — Lone Tree on a Hill
-Removing a prominent tree from a landscape. The algorithm reconstructs the rolling green hills seamlessly.
+### Test 2
 
-![Test 3 - Before](tests/test3_before.jpg)
-![Test 3 - Selected Region](tests/test3_selected_region.jpg)
-![Test 3 - After](tests/test3_after.jpg)
+![Test 2 - Before](tests/test2_before.png)
+![Test 2 - Selected Region](tests/test2_selected_region.png)
+![Test 2 - After](tests/test2_after.png)
+
+---
+
+### Test 3
+
+![Test 3 - Before](tests/test3_before.png)
+![Test 3 - Selected Region](tests/test3_selected_region.png)
+![Test 3 - After](tests/test3_after.png)
 
 ---
