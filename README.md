@@ -4,19 +4,6 @@ A C++ application built with OpenCV that automatically fills in missing or selec
 
 ---
 
-## 📋 Table of Contents
-
-- [Overview](#overview)
-- [How It Works](#how-it-works)
-- [Algorithm Details](#algorithm-details)
-- [Project Structure](#project-structure)
-- [Requirements](#requirements)
-- [Usage](#usage)
-- [Results](#results)
-- [References](#references)
-
----
-
 ## Overview
 
 This project implements **patch-based image inpainting** — a technique that reconstructs missing regions in an image by finding and copying visually similar patches from the known (unmasked) parts of the image. The algorithm prioritizes structural coherence and produces visually plausible results across a wide range of image types.
